@@ -42,7 +42,7 @@ MODEL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS",
 MODEL_NUM_GPU = os.getenv("MODEL_NUM_GPU")
 
 _model_kwargs = {
-    "model": os.getenv("MODEL_NAME", "cybersec-qwen25-3b-q4"),
+    "model": os.getenv("MODEL_NAME", "cybersecqwen"),
     "num_keep": 0,
     "sync_client_kwargs": {"timeout": MODEL_REQUEST_TIMEOUT_SECONDS},
 }
