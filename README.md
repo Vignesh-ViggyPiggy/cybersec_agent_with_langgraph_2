@@ -164,6 +164,56 @@ For each analyzed hierarchy, written back into the same folder (and pushed to th
 - **Dataset routing seems off** — check `datasets_files/*.json` contains valid `incident_type` fields matching what `anomaly_workflow.py`'s category tagging produces.
 - **Report threat_level always high/critical** — should be fixed by the calibration rubric in `ExplainerOutputNode`'s prompt; if you still see this, check the model is actually reaching that code path rather than falling back to the strict-JSON retry path.
 
+## 8. Packaging for a Rocky Linux 8 deployment
+
+Each package ships its own `install.sh`, meant to run standalone on a fresh
+**Rocky Linux 8** machine. Rocky 8's bare `python`/`pip` resolve to system
+Python 3.6/3.7, so both installers explicitly install and use
+**Python 3.11**/**pip3.11** rather than relying on the bare commands.
+
+### 8.1 Build the tarballs (on a machine that already has the model)
+
+```bash
+scripts/package_release.sh
+```
+
+This exports the real weights of the local Ollama `cybersecqwen` model (via
+`scripts/export_model.sh`) into `analysis_system/model/cybersecqwen.gguf`
+alongside a self-contained `model/Modelfile`, then produces:
+
+- `dist/analysis_system.tar.gz`
+- `dist/hierarchy_system.tar.gz`
+
+Neither the exported `.gguf` nor `dist/` are committed to git (see
+`.gitignore`) — they're multi-gigabyte build output, regenerated on demand.
+
+### 8.2 Install on the target machine
+
+Copy the relevant tarball to its target Rocky 8 machine, extract, and run
+the bundled installer as root:
+
+```bash
+tar -xzf analysis_system.tar.gz   # or hierarchy_system.tar.gz
+cd analysis_system                # or hierarchy_system
+sudo ./install.sh
+```
+
+- **`hierarchy_system/install.sh`** — installs Python 3.11 + a venv,
+  `pip3.11 install`s `requirements.txt`, and installs/starts a systemd
+  service (`hierarchy-mcp-server`) for `mcp_server.py`.
+- **`analysis_system/install.sh`** — installs Python 3.11 + a venv, installs
+  `requirements.txt`, installs Ollama, builds `cybersecqwen` from the
+  bundled `model/Modelfile`, installs/starts systemd services for
+  `corpus_server.py` (`analysis-corpus`) and, once you're ready,
+  `trigger_mcp_server.py` (`analysis-trigger`), and runs `ingest_corpus.py`
+  against the freshly-started corpus server.
+
+Neither installer touches real IPs — each copies its own `.env.example` to
+`.env` if one isn't already present, but you still need to **edit `.env`
+yourself** afterward (`MCP_SERVER_URL` on the analysis machine,
+`ANALYSIS_SERVER_URL` on the vault machine) to point at your actual
+environment before starting `analysis-trigger`.
+
 ## Last Updated
 
-August 5, 2026
+August 28, 2026

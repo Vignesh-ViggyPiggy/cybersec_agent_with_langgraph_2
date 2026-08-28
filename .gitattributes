@@ -1,0 +1,4 @@
+# These ship as install scripts run on Rocky Linux 8 — a CRLF shebang line
+# ("#!/usr/bin/env bash\r") fails to exec there, so force LF regardless of
+# this repo's core.autocrlf setting on any given checkout machine.
+*.sh text eol=lf

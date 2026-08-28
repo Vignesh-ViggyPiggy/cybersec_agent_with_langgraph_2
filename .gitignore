@@ -237,3 +237,14 @@ rationalVault/
 # Scratch/one-off test artifacts written during interactive debugging —
 # never meant to persist.
 **/scratch_*.md
+
+# Exported Ollama model weights (analysis_system/model/*.gguf) — produced on
+# demand by scripts/export_model.sh from whatever Ollama already has built
+# locally (multi-GB binary, not source). model/Modelfile itself IS committed
+# — it's just a text recipe with no weights of its own once the .gguf sits
+# next to it.
+analysis_system/model/*.gguf
+
+# Packaged installer tarballs — build output of scripts/package_release.sh,
+# not source.
+/dist/
