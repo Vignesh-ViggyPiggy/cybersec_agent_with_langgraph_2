@@ -164,12 +164,20 @@ For each analyzed hierarchy, written back into the same folder (and pushed to th
 - **Dataset routing seems off** — check `datasets_files/*.json` contains valid `incident_type` fields matching what `anomaly_workflow.py`'s category tagging produces.
 - **Report threat_level always high/critical** — should be fixed by the calibration rubric in `ExplainerOutputNode`'s prompt; if you still see this, check the model is actually reaching that code path rather than falling back to the strict-JSON retry path.
 
-## 8. Packaging for a Rocky Linux 8 deployment
+## 8. Packaging and installing
 
-Each package ships its own `install.sh`, meant to run standalone on a fresh
-**Rocky Linux 8** machine. Rocky 8's bare `python`/`pip` resolve to system
-Python 3.6/3.7, so both installers explicitly install and use
-**Python 3.11**/**pip3.11** rather than relying on the bare commands.
+Each package ships its own `install.sh`, which **detects the platform it's
+running on** (Rocky Linux 8/RHEL-like vs Windows under Git Bash) and
+installs accordingly — no separate script per OS. On Rocky 8, bare
+`python`/`pip` resolve to system Python 3.6/3.7, so both installers
+explicitly install and use **Python 3.11**/**pip3.11** rather than relying
+on the bare commands; on Windows they use `winget` for the same purpose if
+Python 3.11 isn't already present.
+
+There's no service manager involved (no systemd units, no Windows
+services) — install.sh only installs dependencies and ingests the corpus
+once; you bring the actual long-running processes up yourself afterward
+with a plain starter script.
 
 ### 8.1 Build the tarballs (on a machine that already has the model)
 
@@ -189,30 +197,37 @@ Neither the exported `.gguf` nor `dist/` are committed to git (see
 
 ### 8.2 Install on the target machine
 
-Copy the relevant tarball to its target Rocky 8 machine, extract, and run
-the bundled installer as root:
+Copy the relevant tarball to its target machine, extract, and run the
+bundled installer (root/sudo only needed on the Rocky 8 branch, for `dnf`):
 
 ```bash
 tar -xzf analysis_system.tar.gz   # or hierarchy_system.tar.gz
 cd analysis_system                # or hierarchy_system
-sudo ./install.sh
+./install.sh                      # sudo ./install.sh on Rocky 8
 ```
 
-- **`hierarchy_system/install.sh`** — installs Python 3.11 + a venv,
-  `pip3.11 install`s `requirements.txt`, and installs/starts a systemd
-  service (`hierarchy-mcp-server`) for `mcp_server.py`.
-- **`analysis_system/install.sh`** — installs Python 3.11 + a venv, installs
+- **`hierarchy_system/install.sh`** — installs Python 3.11 + a venv and
+  `requirements.txt`. Only one long-running process here, so there's no
+  starter script — once `.env` is set, just run `mcp_server.py` directly
+  (the installer prints the exact command for the venv it created).
+- **`analysis_system/install.sh`** — installs Python 3.11 + a venv and
   `requirements.txt`, installs Ollama, builds `cybersecqwen` from the
-  bundled `model/Modelfile`, installs/starts systemd services for
-  `corpus_server.py` (`analysis-corpus`) and, once you're ready,
-  `trigger_mcp_server.py` (`analysis-trigger`), and runs `ingest_corpus.py`
-  against the freshly-started corpus server.
+  bundled `model/Modelfile`, and ingests `corpus_documents/*.json` into the
+  vector store via a temporarily-started `corpus_server.py`. Once `.env` is
+  set, bring the real services up with:
+  ```bash
+  ./start.sh
+  ```
+  which starts `corpus_server.py` then `trigger_mcp_server.py` in the
+  background (`nohup` + PID files in `corpus_server.pid` /
+  `trigger_mcp_server.pid`; stop with `kill $(cat corpus_server.pid)
+  $(cat trigger_mcp_server.pid)`).
 
 Neither installer touches real IPs — each copies its own `.env.example` to
 `.env` if one isn't already present, but you still need to **edit `.env`
 yourself** afterward (`MCP_SERVER_URL` on the analysis machine,
 `ANALYSIS_SERVER_URL` on the vault machine) to point at your actual
-environment before starting `analysis-trigger`.
+environment before running `start.sh` / `mcp_server.py`.
 
 ## Last Updated
 
