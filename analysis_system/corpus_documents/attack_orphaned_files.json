@@ -1,0 +1,22 @@
+{
+  "id": "attack_orphaned_files",
+  "explanation": "Orphaned-file audit. track_nowner_nouser runs 'find $1 -xdev ( -nouser -o -nogroup )' to locate files with no valid owner or group -- a state that legitimately shouldn't occur in normal operation, since it usually means an account was deleted while it still owned files, or a file was planted by a process running as a UID that no longer maps to any account (a technique sometimes used to hide dropped files). Any count above zero is worth investigating; there's no 'expected baseline' of orphaned files the way there is for, say, SUID binaries.",
+  "metadata": {
+    "attack_type": "orphaned_files",
+    "status_file": "athinio/system/nouser_noowner.xml",
+    "status_tag": "NoOfFiles",
+    "writer_script": "track_nowner_nouser (via largefiles.py)",
+    "confidence": "script mechanism verified; exact output filename and tag name are inferred from the temp-file naming pattern (/NOOWN_NOUSER), not directly observed in a real XML file",
+    "verification_category": "opaque_binary_only",
+    "value_schema": {"type": "count_greater_than_zero"},
+    "value_meanings": {
+      "0": "Clean -- no files found with a missing owner or group.",
+      "N (N>=1)": "N files found with no valid owner/group -- worth checking the file list itself (if present in this file) for which files and where, since this can indicate a deleted-account artifact or a deliberately hidden dropped file."
+    },
+    "caveat": "Exact status_file/status_tag names are inferred, not confirmed against a real populated example -- verify against a real deployment before trusting the exact field name. PARTIAL CONFIRMATION (2026-08-27, from a real product QA test spec): the actual script is secOpsScript_75, and its confirmed real raw outputs are athinio/system/NOOWN_NOUSER (the find results) and athinio/system/secOpsOutput_75 (a duplicate of the same find output, written via tee) -- 'nouser_noowner.xml' as a distinct structured-XML filename was NOT confirmed by that spec; it's presumably produced by the largefiles.py post-processing step but the exact output filename that step writes was not documented. Treat secOpsOutput_75 as the more trustworthy path going forward.",
+    "raw_content_examples": [
+      {"label": "clean (reconstructed)", "content": "<NoOwnerNoUser>\n  <NoOfFiles>0</NoOfFiles>\n</NoOwnerNoUser>", "note": "SPECULATIVE format -- exact schema not directly observed."},
+      {"label": "detected (reconstructed)", "content": "<NoOwnerNoUser>\n  <NoOfFiles>2</NoOfFiles>\n  <File1>/var/tmp/.cache_old</File1>\n  <File2>/opt/legacy/data.bin</File2>\n</NoOwnerNoUser>", "note": "SPECULATIVE -- illustrates the likely intent (count + file list) based on the script's find command, not a confirmed real schema."}
+    ]
+  }
+}

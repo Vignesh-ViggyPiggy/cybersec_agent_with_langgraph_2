@@ -1,0 +1,23 @@
+{
+  "id": "attack_gateway_unauthorized_breakin",
+  "explanation": "Gateway unauthorized break-in attempt -- confirmed via a real product QA test spec (2026-08-27). /athinio/bin/break_alert.sh monitors the gateway log for lines containing 'Possible Break-in Attempt', written by the /athinio/bin/oneCloudFilerx binary whenever it detects a break-in (concretely: a root-created file that a normal user then fails to remove, which the gateway.log records as 'performed the operation Break-in Attempt'). The script greps the log for that phrase (plus one preceding line for context) into /athinio/system/alert_event.txt, then for each match extracts a timestamp and counts how many break-in attempts fall within the last 4 hours. If that count is > 0, it sets <Break-in_status> to 1 in /athinio/system/alertlog.xml, which rolls up to Alert.xml's break-in tag; otherwise it explicitly sets it back to 0. This is a genuinely different mechanism from the user_breach entry's sshd brute-force pattern -- this one is gateway/filer-specific (a permissions/ownership violation on the gateway filesystem), not an SSH login pattern.",
+  "metadata": {
+    "attack_type": "gateway_unauthorized_breakin",
+    "status_file": "Alert.xml",
+    "status_tag": "break-in",
+    "writer_script": "/athinio/bin/oneCloudFilerx (writes 'Possible Break-in Attempt' to gateway.log) -> /athinio/bin/break_alert.sh (greps gateway.log, sets athinio/system/alertlog.xml's Break-in_status, rolling up to Alert.xml's break-in)",
+    "ui_feature_name": "Gateway Unauthorized Break-in Attempt",
+    "confidence": "verified -- confirmed against a real product QA test spec; the break-in tag itself was confirmed present (0) on a real hierarchy, and gateway.log (rotated, gateway.log_NNN) was confirmed present under home/athinio/data/1cloudFiler/log/ on that same hierarchy",
+    "verification_category": "check_raw_logs",
+    "value_schema": {"type": "binary_flag"},
+    "value_meanings": {
+      "0": "Clean -- no 'Possible Break-in Attempt' lines found in gateway.log within the last 4 hours.",
+      "1": "Break-in detected -- at least one break-in attempt (per oneCloudFilerx's own detection, typically a permissions/ownership violation on the gateway filesystem) was logged within the last 4 hours."
+    },
+    "caveat": "VERIFICATION MECHANISM FIX (2026-08-27): this entry originally used the generic LLM-based verify_against_raw_evidence_node with athinio/system/alertlog.xml as supplementary evidence, alongside an unrotated (wrong) exact gateway.log path. On a real live run, this produced a confirmed self-contradicting result: the model's own reasoning said 'the specific gateway break-in status remains correctly reported as 0' but still classified the overall result as a discrepancy, because alertlog.xml is a shared multi-tag file and the model treated OTHER unrelated active flags in it (Breach_val, suspicious_user_login, etc.) as if they were evidence against THIS specific attack type. Strengthening the verification prompt to explicitly ignore unrelated tags did not reliably fix this. Moved to check_raw_logs instead -- a deterministic phrase match ('Break-in Attempt') against gateway.log directly, glob-matched as gateway.log* to handle the confirmed Julian-day rotation, with no shared multi-tag file involved at all. The 4-hour window means <Break-in_status> can flip back to 0 even after a real detection, once enough time passes with no new matching log lines -- a 'clean' read here doesn't rule out a break-in that happened, say, 5 hours ago; the raw-log phrase match doesn't have this limitation as long as the rotated log covering that window is still present.",
+    "raw_content_examples": [
+      {"label": "clean", "content": "<ALERT>\n  <break-in>0</break-in>\n</ALERT>", "note": "Confirmed live on real hierarchy 5/101/1/4/1, 2026-08-27 -- no recent break-in attempts."},
+      {"label": "detected (illustrative, per confirmed script logic)", "content": "gateway.log:\nUSER ID: normaluser performed the operation Break-in Attempt on /oneCloud/Backup/VaultD/rootfile\n\n<ALERT>\n  <break-in>1</break-in>\n</ALERT>", "note": "Illustrative based on the confirmed test case (root creates a file in oneCloud/Backup/VaultD, a normal user's removal attempt is denied and logged) -- exact log line format not directly observed."}
+    ]
+  }
+}

@@ -2,10 +2,7 @@
 from fastmcp import FastMCP
 from pathlib import Path
 
-#from test import _run_workflow_for_hierarchy, DEFAULT_VAULT_ROOT
-from test_legacy_log_aggregation import _run_workflow_for_hierarchy, DEFAULT_VAULT_ROOT
-
-from mcp_client import send_files
+from attack_status_workflow import run_full_workflow, DEFAULT_VAULT_ROOT
 
 mcp = FastMCP("Analysis-Trigger")
 
@@ -15,32 +12,19 @@ HIERARCHIES_DIR = Path(__file__).parent / "hierarchies"
 @mcp.tool()
 def analyze_hierarchy(hierarchy: str, vault_root: str = DEFAULT_VAULT_ROOT) -> dict:
     """
-    Run the cybersecurity analysis workflow for one hierarchy path
-    (e.g. "5/101/1/4/1"). Pulls that hierarchy's files from the vault,
-    consolidates them, runs the LangGraph workflow, then pushes the report
-    and IOC XML back to the vault alongside the source files.
+    Run the full analysis workflow for one hierarchy path (e.g. "5/101/1/4/1")
+    — every per-attack status check, followed by secure/messages/audit.log
+    analysis as a catch-all, all in one report. Pulls that hierarchy's files
+    from the vault, then pushes the finished report back alongside the
+    source files; run_full_workflow handles both internally.
     """
-    result = _run_workflow_for_hierarchy(hierarchy, vault_root, HIERARCHIES_DIR)
-
-    hierarchy_clean = hierarchy.strip("/\\")
-    report_path = result.get("report_path")
-    xml_output_path = result.get("xml_output_path")
-
-    for local_path in (report_path, xml_output_path):
-        if not local_path:
-            continue
-        local_file = Path(local_path)
-        send_files(
-            str(local_file),
-            "upload_file",
-            relative_path=f"{hierarchy_clean}/{local_file.name}",
-        )
+    result = run_full_workflow(hierarchy, vault_root, HIERARCHIES_DIR)
 
     return {
         "hierarchy": hierarchy,
-        "report_path": report_path,
-        "xml_output_path": xml_output_path,
-        "threat_level": result.get("explainer_output", {}).get("threat_level"),
+        "report_path": result.get("report_path"),
+        "summary_counts": result.get("summary_counts"),
+        "log_analysis": result.get("log_analysis"),
     }
 
 

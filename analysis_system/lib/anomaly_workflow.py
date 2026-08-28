@@ -1,7 +1,7 @@
 """
 anomaly_workflow.py — standalone anomaly-detection workflow.
 
-Separate from test.py for now, per design: this pulls one hierarchy's full
+Separate from lib/log_analysis_workflow.py for now, per design: this pulls one hierarchy's full
 data (existing rationalVault/data/<hierarchy> tree, plus /athinio/security
 and the relevant /var/log sources), then runs it through two passes:
 
@@ -14,7 +14,9 @@ and the relevant /var/log sources), then runs it through two passes:
   things a fixed threshold rule might miss, not just what's already flagged.
 
 Output: hierarchies/<hierarchy>/anomaly_findings.txt — only this (not the
-raw pulled files) is meant to eventually feed into test.py's workflow.
+raw pulled files) is meant to eventually feed into lib/log_analysis_workflow.py's
+per-incident pipeline (not yet wired in — that pipeline currently reads
+LOG_FILE_PATHS' three canonical log files directly, not this file).
 
 Usage:
     python anomaly_workflow.py 5/101/1/4/1
@@ -39,8 +41,8 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-from mcp_client import fetch_directory_files, decode_file_content
-from populate_hierarchies import populate_hierarchies as pull_hierarchy_from_vault
+from lib.mcp_client import fetch_directory_files, decode_file_content
+from lib.populate_hierarchies import populate_hierarchies as pull_hierarchy_from_vault
 
 # Absolute path — mcp_server.py's BASE_DIR is wherever it happens to be
 # running from (Path(__file__).parent), so a relative default here silently
@@ -1048,7 +1050,7 @@ def run_anomaly_detection(hierarchy: str, vault_root: str, hierarchies_dir: Path
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Standalone anomaly-detection workflow (pull + Pass 1 + Pass 2), separate from test.py for now."
+        description="Standalone anomaly-detection workflow (pull + Pass 1 + Pass 2), separate from lib/log_analysis_workflow.py for now."
     )
     parser.add_argument("hierarchy", help="e.g. 5/101/1/4/1")
     parser.add_argument("--vault-root", default=DEFAULT_VAULT_ROOT)

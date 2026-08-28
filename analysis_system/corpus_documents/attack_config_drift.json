@@ -1,0 +1,33 @@
+{
+  "id": "attack_config_drift",
+  "explanation": "Security configuration drift -- unauthorized changes to admin-configured tracked files (paths listed in ConfigDriftControl.xml's driftpath_N entries, e.g. rclient_config.xml, MetricBinLogs.xml), open firewall ports, and identity-asset mappings. MECHANISM REBUILT FROM REAL SOURCE (2026-08-28): /athinio/bin/secOpsScript_94 is the actual detector -- NOT configdrift.sh, which was previously (and incorrectly) assumed to own this attack type. secOpsScript_94 never writes to Alert.xml or alertlog.xml at all; its own output file, secOpsOutput_94, IS the primary and only evidence -- confirmed by matching its real live content on hierarchy 5/101/1/4/1 exactly ('rclient_config.xml / None / MetricBinLogs.xml / None / FirewallStatus / None / IdentityAsset / None'). For each tracked path it diffs the live file against a stored baseline copy; a real change only counts as drift if more than 24 hours have passed since the reference/install time (a settling-period grace window) -- changes within that window silently become the new baseline instead of being flagged. Firewall ports and identity-asset mappings are checked the same way, each writing their own filename/status pair. Drift alerts auto-expire after 24 hours with no operator response (checked via user_incident.xml's security_config_ignore/security_config_intrusion flags), at which point baselines are refreshed and the alert clears itself -- this is real, deliberate, self-healing behavior, not a bug. configdrift.sh (a DIFFERENT script, writing to /athinio/system/config_dift.xml -- note the real filename is missing the 'r') does something else entirely: it only snapshots file mtimes/permissions/auditctl rules with no baseline-diff logic anywhere in it. Its actual purpose/consumer is still unconfirmed -- it may be a separate, unrelated feature, dead code, or feed a comparison mechanism not yet located. Do not conflate it with this attack type.",
+  "metadata": {
+    "attack_type": "config_drift",
+    "status_file": "athinio/system/secOpsOutput_94",
+    "status_tag": "N/A -- text scan for 'Tampered', not a tag read",
+    "writer_script": "/athinio/bin/secOpsScript_94",
+    "ui_feature_name": "Security Configuration Check",
+    "ui_feature_name_note": "No exact matching tag was found in cmd_in.xml's confirmed feature list -- generic placeholder, not sourced from a confirmed UI label.",
+    "confidence": "verified -- writer script's real source read directly, and its output format matches real live content on hierarchy 5/101/1/4/1 exactly",
+    "verification_category": "opaque_binary_only",
+    "value_schema": {"type": "file_contains_pattern", "detected_regex": "Tampered"},
+    "value_meanings": {
+      "no 'Tampered' anywhere in the file": "Clean -- every tracked path (config files, firewall ports, identity-asset mappings) matched its stored baseline on the last run, confirmed live on hierarchy 5/101/1/4/1 (2026-08-28): 'rclient_config.xml / None / MetricBinLogs.xml / None / FirewallStatus / None / IdentityAsset / None'.",
+      "any 'Tampered' line present": "Drift detected for that specific item -- the line immediately before 'Tampered' in the file names which tracked item (a config file, 'FirewallStatus', or 'IdentityAsset') actually drifted. A single scan for the word alone doesn't say which one without also showing the preceding line."
+    },
+    "caveat": "MAJOR MECHANISM CORRECTION (2026-08-28): every previous version of this entry (Alert_config_lin.xml/mtime_binary, then secOpsOutput_94 vs sec_config_lin_verified.xml as a two-file diff) was wrong -- confirmed by reading secOpsScript_94's actual source. There is no Alert.xml/alertlog.xml tag for this attack type at all; secOpsOutput_94 IS the primary evidence, not secondary corroboration for some other flag. Detection also has a real 24-hour grace period (a change within 24h of the reference time updates the baseline silently instead of flagging) and a real 24-hour auto-expiry (an unaddressed drift alert clears itself and refreshes baselines if no operator responds via user_incident.xml) -- both are deliberate product behavior, not bugs, but mean 'Tampered' in a snapshot can already be stale/self-cleared by the time this workflow reads it. sec_config_lin_verified.xml and the two-file-diff framing from earlier sessions should be considered retired -- that file's actual purpose (if any) was never confirmed to relate to this mechanism.",
+    "raw_content_examples": [
+      {
+        "label": "clean -- confirmed live on real hierarchy",
+        "content": "rclient_config.xml\nNone\nMetricBinLogs.xml\nNone\nFirewallStatus\nNone\nIdentityAsset\nNone",
+        "note": "Confirmed live on hierarchy 5/101/1/4/1, 2026-08-28 -- exact byte-for-byte match to secOpsScript_94's real write logic."
+      },
+      {
+        "label": "drift detected (illustrative, per confirmed script logic)",
+        "content": "rclient_config.xml\nTampered\nMetricBinLogs.xml\nNone\nFirewallStatus\nTampered\nIdentityAsset\nNone",
+        "note": "Illustrative -- rclient_config.xml changed outside the 24h grace window, and an unexpected firewall port was found open. Not directly observed as a live detection."
+      }
+    ],
+    "related_entries": "secopsoutput_94"
+  }
+}

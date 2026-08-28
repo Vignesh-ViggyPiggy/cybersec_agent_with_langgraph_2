@@ -1,0 +1,24 @@
+{
+  "id": "attack_honeypot",
+  "explanation": "Honeypot security trap triggered -- an attacker is actively probing the system, or a ransomware-style file-tamper check against a decoy path failed. The honeypot tag in Alert.xml is the flag consumers read: 0 means clean, 1 means the honeypot trap was tripped. WRITER CONFIRMED (2026-08-27, from a real product QA test spec): /athinio/bin/rChecker_md.sh monitors decoy directories under the path in /athinio/config/config.xml's <nerviofsMountPath> tag and does a file-content diff (not directory-listing) between mirrored src/dest pairs; any mismatch sets <Honeypot> to 1 in /athinio/system/alertlog.xml. Separately, /athinio/bin/secOpsScript_78 resets alertlog.xml's <honeypot> to 0 at the start of its own run, then reads /rationalVault/data/config_xml/Linguard.xml's <Hfilepath> for a comparison path and runs the /athinio/bin/modification binary, setting <honeypot> back to 1 if that check fails. Both alertlog.xml tags (documented with differing case, <Honeypot> vs <honeypot> -- unclear if this is a real distinction or a documentation typo) are understood to roll up into Alert.xml's single lowercase honeypot tag, matching how bin/lib/breachval/etc. are confirmed to roll up from alertlog.xml to Alert.xml on a real hierarchy.",
+  "metadata": {
+    "attack_type": "honeypot",
+    "status_file": "Alert.xml",
+    "status_tag": "honeypot",
+    "writer_script": "/athinio/bin/rChecker_md.sh (decoy file-diff, per-path via nerviofsMountPath) and/or /athinio/bin/secOpsScript_78 (Linguard.xml Hfilepath + modification binary) -- both write to athinio/system/alertlog.xml's Honeypot/honeypot tag, which rolls up to Alert.xml's honeypot",
+    "ui_feature_name": "Honeypot Detection",
+    "confidence": "writer scripts confirmed against a real product QA test spec (2026-08-27); previously zero confirmed detectors were found in the code-only extraction",
+    "verification_category": "opaque_binary_only",
+    "value_schema": {"type": "binary_flag"},
+    "raw_evidence_files": ["athinio/system/alertlog.xml"],
+    "value_meanings": {
+      "0": "Clean -- no honeypot trap has been triggered since the last reset. Confirmed live on real hierarchy 5/101/1/4/1 (2026-08-27).",
+      "1": "Honeypot triggered -- either a decoy directory's content diverged from its mirrored reference (rChecker_md.sh), or the Linguard.xml-configured honeypot path failed the modification-binary check (secOpsScript_78). Both are inherently suspicious since legitimate traffic has no reason to touch a honeypot / modify its reference copy."
+    },
+    "caveat": "WRITER CONFIRMED (2026-08-27): earlier versions of this entry had zero confirmed writers -- a real product QA test spec has since confirmed both rChecker_md.sh and secOpsScript_78 as the writers, and athinio/system/alertlog.xml as a corroborating evidence file one step upstream of Alert.xml. Still unresolved: whether alertlog.xml's <Honeypot> and <honeypot> (documented with different case) are genuinely two different tags or a documentation typo referring to the same one -- both were seen as identical-looking entries in the source spec.",
+    "raw_content_examples": [
+      {"label": "clean", "content": "<ALERT>\n  <honeypot>0</honeypot>\n</ALERT>", "note": "Confirmed live on real hierarchy 5/101/1/4/1, 2026-08-27 -- no trap triggered."},
+      {"label": "detected", "content": "<ALERT>\n  <honeypot>1</honeypot>\n</ALERT>", "note": "The decoy resource was interacted with, or its content diverged from a reference copy -- treat as a strong signal of active probing or tampering, since a honeypot has no legitimate traffic by design."}
+    ]
+  }
+}

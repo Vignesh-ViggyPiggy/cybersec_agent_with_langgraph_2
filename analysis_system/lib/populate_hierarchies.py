@@ -2,7 +2,7 @@
 Manually-run script that pulls customer files from a rationalVault path on the
 MCP server and lays them out under hierarchies/ in this project, mirroring
 the server-side {company_id}/{customer_id}/{branch_id}/{product_id}/{system_id}
-structure so test.py can pick them up on its next batch run.
+structure so attack_status_workflow.py can pick them up on its next run.
 
 Pass --hierarchy to scope both the server-side fetch and the local write to a
 single customer's tree, so only that hierarchy's files are sent for analysis
@@ -17,7 +17,7 @@ Usage:
 import argparse
 from pathlib import Path
 
-from mcp_client import fetch_directory_files, decode_file_content
+from lib.mcp_client import fetch_directory_files, decode_file_content
 
 
 def populate_hierarchies(root_path: str, dest_dir: Path, hierarchy: str | None = None) -> None:

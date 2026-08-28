@@ -1,0 +1,20 @@
+{
+  "id": "getclamstatus_binary",
+  "explanation": "getclamstatus is a compiled PyInstaller binary with no recoverable source in this bundle. Its behavior is inferred only from call sites and output: clam.sh invokes it with the ClamAV scan output, and it writes onegrid_infectedStatus/athgateway_infectedStatus into cmd_out.xml as a STRING like 'Infected files: N'. There is no separate raw-evidence file to independently verify this against -- the tag it writes is the only available signal. See attack_clam_malware for the attack-status/value-meaning view of the same mechanism.",
+  "metadata": {
+    "file_path": "athinio/bin/getclamstatus",
+    "category": "opaque_binary",
+    "writer_script": "getclamstatus (binary, no source)",
+    "reader": "cmd_out.xml consumers",
+    "confidence": "inferred, not verified",
+    "verification_role": "none possible -- tag is the only signal, must be trusted or flagged as unverifiable",
+    "value_meanings": {
+      "Infected files: 0": "Clean -- zero infected files on the last clamscan run.",
+      "Infected files: N (N>=1)": "N infected files found -- getclamstatus just relays clamscan's count verbatim into this string, it doesn't add its own severity classification."
+    },
+    "raw_content_examples": [
+      {"label": "clean", "content": "<onegrid_infectedStatus>Infected files: 0</onegrid_infectedStatus>\n<athgateway_infectedStatus>Infected files: 0</athgateway_infectedStatus>", "note": "Both tags mirror the same scan result for their respective components."},
+      {"label": "detected", "content": "<onegrid_infectedStatus>Infected files: 3</onegrid_infectedStatus>\n<athgateway_infectedStatus>Infected files: 3</athgateway_infectedStatus>", "note": "3 infected files found -- both tags updated identically since they reflect the same underlying scan."}
+    ]
+  }
+}

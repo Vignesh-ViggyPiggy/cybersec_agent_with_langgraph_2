@@ -1,0 +1,36 @@
+{
+  "id": "attack_unauthorized_ddl",
+  "explanation": "Unauthorized DDL activity (DROP/CREATE/ALTER/TRUNCATE) on a monitored database. drop_table is the primary tag checked; create_table/alter_table/truncate_table are sibling tags for the other DDL operations, all in Alert.xml, each independently 0 or 1. No script that sets these tags was found in this bundle -- likely produced by an Oracle-audit component (adv_risk.xml/ddl_unauthorized_config.xml carry DDL-monitoring configuration) not captured in this extraction.",
+  "metadata": {
+    "attack_type": "unauthorized_ddl",
+    "status_file": "Alert.xml",
+    "status_tag": "drop_table",
+    "status_tags": ["drop_table", "create_table", "alter_table", "truncate_table"],
+    "writer_script": "unknown -- likely an Oracle-audit component not present in this bundle",
+    "confidence": "inferred, low",
+    "verification_category": "opaque_binary_only",
+    "value_schema": {"type": "binary_flag"},
+    "value_meanings": {
+      "0": "Clean for that specific operation -- e.g. drop_table=0 means no unauthorized DROP was detected. Each of the 4 sibling tags is independent.",
+      "1": "That specific unauthorized DDL operation occurred -- e.g. drop_table=1 means an unauthorized DROP statement ran. Multiple tags can be 1 simultaneously if several operation types occurred in the same window."
+    },
+    "caveat": "COVERAGE FIX (2026-08-27): this entry previously only checked drop_table and would report 'not detected' even if create_table/alter_table/truncate_table were the only tags actually flagged. Now reads all 4 via status_tags -- detected if ANY of them is 1. On the real test hierarchy (5/101/1/4/1) all 4 currently read 0, so this specific gap hadn't yet produced a live false negative, but it's the same class of bug confirmed live in the ransomware entry (see attack_ransomware's caveat). Zero confirmed detectors otherwise. adv_risk.xml and ddl_unauthorized_config.xml both carry DDL-monitoring configuration (unauthorized_enabled, default_unauth_events, etc.) suggesting a real detection component exists for this product, just not in this extraction -- note ddl_unauthorized_config.xml is itself config (what's monitored), not status, and should never be read as if it were a result.",
+    "raw_content_examples": [
+      {
+        "label": "clean",
+        "content": "<ALERT>\n  <drop_table>0</drop_table>\n  <create_table>0</create_table>\n  <alter_table>0</alter_table>\n  <truncate_table>0</truncate_table>\n</ALERT>",
+        "note": "No unauthorized DDL of any kind detected."
+      },
+      {
+        "label": "single operation detected",
+        "content": "<ALERT>\n  <drop_table>1</drop_table>\n  <create_table>0</create_table>\n  <alter_table>0</alter_table>\n  <truncate_table>0</truncate_table>\n</ALERT>",
+        "note": "Only an unauthorized DROP occurred -- the other 3 DDL types are clean, so this was likely one isolated statement rather than a broader attack pattern."
+      },
+      {
+        "label": "multiple operations detected",
+        "content": "<ALERT>\n  <drop_table>1</drop_table>\n  <create_table>0</create_table>\n  <alter_table>1</alter_table>\n  <truncate_table>1</truncate_table>\n</ALERT>",
+        "note": "DROP, ALTER, and TRUNCATE all flagged together -- this pattern (multiple destructive DDL types in the same window, but no CREATE) looks more like an attacker actively destroying/modifying data than a single accidental statement, and should be treated with higher urgency than a single flagged operation."
+      }
+    ]
+  }
+}

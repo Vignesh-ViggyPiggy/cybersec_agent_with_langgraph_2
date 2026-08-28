@@ -1,0 +1,29 @@
+{
+  "id": "user_incident_xml",
+  "explanation": "user_incident.xml is not a detection output -- it's the record of a human analyst's decision on a specific alert, written by Alert_ID_response.sh when someone marks an alert as 'ignore' or confirms it as a real 'intrusion' via the dashboard. It has 24 {type}_ignore/{type}_intrusion tag pairs, each independently 0 or 1. Both being 0 means no human has reviewed that alert type yet -- it does NOT mean the alert was cleared. This distinguishes 'the script detected X' from 'a human confirmed X was real' -- the second is a much stronger signal.",
+  "metadata": {
+    "file_path": "rationalVault/reqlin_xml/user_incident.xml",
+    "category": "human_decision",
+    "writer_script": "Alert_ID_response.sh",
+    "reader": "chatbot backend, synced to client via syncToDevice.xml",
+    "confidence": "verified",
+    "value_meanings": {
+      "{type}_ignore=0, {type}_intrusion=0": "Unreviewed -- no human has made a decision on this alert type yet. Not the same as 'cleared' or 'dismissed'.",
+      "{type}_ignore=1, {type}_intrusion=0": "A human explicitly dismissed this alert as a false positive.",
+      "{type}_ignore=0, {type}_intrusion=1": "A human explicitly confirmed this alert as a real intrusion -- this is a stronger signal than any automated detection tag alone, since it reflects human judgment applied to the evidence.",
+      "{type}_ignore=1, {type}_intrusion=1": "Not expected under normal use -- both tags set for the same type would mean contradictory human decisions were recorded, worth investigating as a possible data-entry or sync issue rather than trusting either value."
+    },
+    "raw_content_examples": [
+      {
+        "label": "unreviewed",
+        "content": "<user_response>\n  <security_config_ignore>0</security_config_ignore>\n  <security_config_intrusion>0</security_config_intrusion>\n</user_response>",
+        "note": "No human decision recorded yet for security_config."
+      },
+      {
+        "label": "confirmed intrusion and dismissed alert side by side",
+        "content": "<user_response>\n  <security_config_ignore>0</security_config_ignore>\n  <security_config_intrusion>1</security_config_intrusion>\n  <user_breach_ignore>1</user_breach_ignore>\n  <user_breach_intrusion>0</user_breach_intrusion>\n</user_response>",
+        "note": "security_config was confirmed as a real intrusion by a human; user_breach was reviewed and dismissed as a false positive -- these are two independent human judgments on two different alert types, not a contradiction."
+      }
+    ]
+  }
+}

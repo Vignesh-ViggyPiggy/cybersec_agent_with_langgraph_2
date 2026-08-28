@@ -1,0 +1,28 @@
+{
+  "id": "threatanalysis_output_xml",
+  "explanation": "Threatanalysis_output.xml holds the computed output of scanning-lin.py's 18-factor composite risk scoring -- not a raw attack flag, a derived score combining multiple signals (e.g. CPU load + memory pressure, or ransomware detection + honeypot trigger together). Each factor_N entry has a factorname matching rv_ioc_lin.xml's vector_group names and a status score: 0.01 is the baseline/clean floor used throughout this file's template, and any higher value means the underlying combination of conditions was at least partially met -- the score is a sum across that factor's contributing vectors, so it also carries rough magnitude information, not just a yes/no.",
+  "metadata": {
+    "file_path": "Threatanalysis_output.xml",
+    "category": "derived_score",
+    "writer_script": "scanning-lin.py",
+    "reader": "not currently read by the chatbot backend -- only raw Alert.xml is",
+    "confidence": "verified",
+    "caveat": "scanning-lin.py compares some of these values as strings not numbers (e.g. Disk_value >= str(float(...) * threshold)), which can misfire depending on value formatting",
+    "value_meanings": {
+      "0.01": "Baseline/clean floor -- none of this factor's contributing vectors fired. This is the template default, not a computed zero.",
+      "any value above 0.01": "This factor's underlying condition combination was at least partially met -- the exact scoring arithmetic (whether it's a sum, an average, or something else) wasn't independently verified, so treat any above-baseline value as 'worth investigating' rather than trying to infer a precise vector count from the number itself."
+    },
+    "raw_content_examples": [
+      {
+        "label": "all clean",
+        "content": "<Threat>\n  <NoOfEntries>18</NoOfEntries>\n  <factor_1>\n    <factorname>CpuLoadAndMemorySpace</factorname>\n    <status>0.01</status>\n  </factor_1>\n  <factor_2>\n    <factorname>RansomewareAndHoneypotDetection</factorname>\n    <status>0.01</status>\n  </factor_2>\n</Threat>",
+        "note": "Both factors at baseline -- nothing firing."
+      },
+      {
+        "label": "one composite factor fully triggered",
+        "content": "<Threat>\n  <NoOfEntries>18</NoOfEntries>\n  <factor_1>\n    <factorname>CpuLoadAndMemorySpace</factorname>\n    <status>0.01</status>\n  </factor_1>\n  <factor_2>\n    <factorname>RansomewareAndHoneypotDetection</factorname>\n    <status>0.50</status>\n  </factor_2>\n</Threat>",
+        "note": "factor_2's elevated score means at least one (possibly both) of its contributing signals (Ransom and Honeypot) are active -- the exact per-vector scoring arithmetic scanning-lin.py uses wasn't independently verified in the investigation, only that it produces a composite score rather than a single tag's flat 0/1. Don't assume the specific value maps to a precise vector count without confirming against the actual script logic."
+      }
+    ]
+  }
+}

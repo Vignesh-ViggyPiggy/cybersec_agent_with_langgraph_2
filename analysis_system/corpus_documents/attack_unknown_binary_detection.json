@@ -1,0 +1,26 @@
+{
+  "id": "attack_unknown_binary_detection",
+  "explanation": "New Binary Detection -- an unrecognized process is running that wasn't present during the initial learning period. SPLIT OUT FROM rootkit_malware (2026-08-28) after definitively confirming, from real source, that Alert.xml's unknown_binary tag has nothing to do with rootkits. The real continuous detector is /athinio/bin/secOpsScript_112_bkp: a daemon that loops every 5 seconds enumerating every running PID's binary via readlink -f /proc/$pid/exe. For the first 2 weeks (1209600s) after first run, every distinct binary path seen is recorded into /athinio/system/unique_binaries.txt as the learning-phase baseline. After that, any running binary NOT in that baseline (and not in a couple of allow-list files) gets logged -- 'Attack : Unknown binary detected: <path> (PID N)' -- to /rationalVault/log/rationalclient.log and /var/log/osstatus.log, and sets alertlog.xml's Unknown_binary to 1, which rolls up to Alert.xml's unknown_binary. A separate wrapper, /athinio/bin/secOpsScript_112 (no _bkp suffix), manages the daemon (starts/stops it) and handles admin actions -- killing the offending process (kill_unknow_binary via param_cmd_112.xml) -- plus operator-triggered and automatic 24-hour ignore/reset (same self-clearing pattern as config_drift, gateway_breach_activity, and user_breach). This wrapper also writes secOpsOutput_112, but for the DETECTED case specifically it appends the real offending binary list ('Detected Unknown Binaries:' + the path(s)) -- unlike gateway_breach_activity/user_breach's purely-restated evidence, this one adds genuinely useful detail beyond the bare tag.",
+  "metadata": {
+    "attack_type": "unknown_binary_detection",
+    "status_file": "Alert.xml",
+    "status_tag": "unknown_binary",
+    "writer_script": "/athinio/bin/secOpsScript_112_bkp (real continuous detector, /proc/$pid/exe enumeration, 2-week baseline) -- managed/reported by /athinio/bin/secOpsScript_112 (wrapper: kill-process admin action, ignore/auto-ignore reset, appends detected binaries to secOpsOutput_112)",
+    "ui_feature_name": "New Binary Detection",
+    "ui_feature_name_note": "Matches the LinGuard product manual's separately-documented 'New Binary Detection' / system-software-tampering feature description.",
+    "confidence": "verified -- both scripts' real source read directly (2026-08-28); confirmed live and CURRENTLY ACTIVE on real hierarchy 5/101/1/4/1 (unknown_binary=1, flagging /usr/lib/systemd/systemd-user-runtime-dir)",
+    "verification_category": "readable_report",
+    "value_schema": {"type": "binary_flag"},
+    "raw_evidence_files": ["athinio/system/secOpsOutput_112"],
+    "value_meanings": {
+      "0": "Clean -- every currently-running process's binary is in the learned baseline (or the daemon is still within its 2-week learning period, during which nothing is ever flagged).",
+      "1": "Unrecognized binary detected -- a running process's binary wasn't seen during the 2-week learning period. Confirmed live on real hierarchy 5/101/1/4/1 (2026-08-28): /usr/lib/systemd/systemd-user-runtime-dir."
+    },
+    "caveat": "SPLIT FROM rootkit_malware (2026-08-28): this entry now owns Alert.xml's unknown_binary tag exclusively -- rootkit_malware has been rebuilt around rkhunter's own evidence file (secOpsOutput_91) instead, since real source confirms rkhunter never touches this tag. A clean read during the first 2 weeks after deployment doesn't mean nothing unusual is running -- it means the baseline is still being built and nothing gets flagged yet, the same class of caveat as gateway_breach_activity's/user_breach's baseline periods.",
+    "raw_content_examples": [
+      {"label": "clean (illustrative -- past learning period, nothing unrecognized)", "content": "<ALERT>\n  <unknown_binary>0</unknown_binary>\n</ALERT>", "note": "Illustrative -- not directly observed, since this hierarchy currently has an active detection."},
+      {"label": "detected -- confirmed live", "content": "<ALERT>\n  <unknown_binary>1</unknown_binary>\n</ALERT>\n\nsecOpsOutput_112:\nAttack : Unknown binary detected: '/usr/lib/systemd/systemd-user-runtime-dir' (PID N)\n\nDetected Unknown Binaries:\n/usr/lib/systemd/systemd-user-runtime-dir\n-----------------------------------", "note": "Confirmed live on real hierarchy 5/101/1/4/1, 2026-08-28."}
+    ],
+    "related_entries": "rootkit_malware"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "attack_secure_vault_ransomware",
+  "explanation": "Secure vault ransomware detection -- originally documented via a real product QA test spec (2026-08-27) as its own mechanism inside secOpsScript_78, setting alertlog.xml's SV_Ransom_current_status/SV_Ransom_detect_time. CONTRADICTED BY REAL SOURCE (2026-08-28): reading the actual, current /athinio/bin/secOpsScript_78 in full shows no such tags anywhere in it. The closest real logic is its ransomcheck() function, which does compare /LinGuard/home_data against each configured param_cmd_78.xml destination via rChecker on a file-content basis -- but that function only LOGS its result ('Alert : Ransomeware corruption Found in $des' / 'INFO : Ransomeware corruption NOT Found in $des' to rationalclient.log and osstatus.log) and never sets any XML tag from its own outcome. The one file it writes to (/athinio/system/rcheckOutput, via append) is never truncated at the start of a run anywhere in the script, so a 'Ransomware corruption FOund' string could persist in it indefinitely from any past run -- using that file as a fresh evidence source would risk reporting a stale historical finding as current. Either the QA doc describes an older/different version of this script than what's actually deployed now, or SV_Ransom_current_status is set by some other component not present in this bundle. Given no trustworthy tag or evidence file is currently confirmed, this data source is marked unreliable rather than guessed at.",
+  "metadata": {
+    "attack_type": "secure_vault_ransomware",
+    "status_file": "athinio/system/alertlog.xml",
+    "status_tag": "SV_Ransom_current_status",
+    "writer_script": "UNCONFIRMED -- documented in a QA test spec but not found in the real, current secOpsScript_78 source; may be stale documentation or a component not present in this bundle",
+    "ui_feature_name": "Secure Vault Ransomware",
+    "confidence": "contradicted -- the QA-doc-claimed writer script's real source does not contain this mechanism (verified 2026-08-28)",
+    "verification_category": "opaque_binary_only",
+    "value_schema": {"type": "binary_flag"},
+    "data_source_reliable": false,
+    "value_meanings": {
+      "n/a": "This data source is marked unreliable -- see caveat. Do not trust a clean OR detected reading of this tag; the workflow short-circuits to 'cannot determine' before reading it at all."
+    },
+    "caveat": "DATA SOURCE MARKED UNRELIABLE (2026-08-28): SV_Ransom_current_status/SV_Ransom_detect_time were claimed by a real product QA test spec to be set inside secOpsScript_78, but that script's real, current source (read in full) contains no such tags -- only a ransomcheck() function that logs its result without ever writing an XML tag from it. The one candidate evidence file (rcheckOutput) is never truncated at the start of a run, so it can't reliably distinguish a fresh finding from a stale one from any prior run since deployment -- using it would risk a confidently-wrong 'detected' result long after the real condition cleared. Rather than build a check on a source this unreliable, data_source_reliable is set to false so this attack type reports 'cannot determine' instead of guessing. If a genuine SV_Ransom-setting mechanism is found later (a different script version, a newer secOpsScript_78, or a compiled component), this entry should be rebuilt around it.",
+    "raw_content_examples": [
+      {"label": "n/a -- data source unreliable", "content": "N/A", "note": "This attack type short-circuits to cannot_determine before any value is read -- see data_source_reliable and caveat."}
+    ]
+  }
+}

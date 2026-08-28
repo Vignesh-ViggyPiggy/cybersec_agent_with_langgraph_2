@@ -1,0 +1,30 @@
+{
+  "id": "rootkitscan_txt",
+  "explanation": "rootkitscan.txt is the raw output of rkhunter (Rootkit Hunter), overwritten each run by rkhunter.sh's cron-daily job (--cronjob --report-warnings-only) and by install-rkhunter's initial check. Unlike aide_report.txt (a file-integrity diff), this is a warnings-style report covering things like suspicious SUID binaries, hidden processes, known rootkit signatures, and unusual system-account configuration. A clean run produces zero warning lines; any warning present is worth reading in full, since rkhunter's warnings are already pre-filtered to unusual conditions.",
+  "metadata": {
+    "file_path": "athinio/system/rootkitscan.txt",
+    "category": "raw_evidence",
+    "writer_script": "rkhunter.sh (cron-daily), install-rkhunter (initial run)",
+    "reader": "human/dashboard only -- not parsed by any script in this bundle",
+    "confidence": "verified",
+    "verification_role": "secondary raw-evidence source for rootkit checks, alongside aide_report.txt -- different tool, different report style, both worth reading independently since one can catch things the other misses",
+    "value_meanings": {
+      "no Warning: lines": "Clean -- rkhunter's scan completed with nothing flagged.",
+      "SSH/rkhunter config mismatch warning": "A configuration inconsistency, not necessarily an active compromise -- e.g. sshd allows root login but rkhunter's own config assumes it doesn't. Worth fixing but lower urgency than a rootkit signature match.",
+      "passwordless login warning": "Genuinely concerning -- an account with no password is a live attack surface, not just a hygiene issue.",
+      "unexpected UID-0 account warning": "High severity -- a second UID-0 (root-equivalent) account is a classic backdoor pattern, especially if its name isn't 'root'."
+    },
+    "raw_content_examples": [
+      {
+        "label": "clean",
+        "content": "No warnings found. System looks clean.",
+        "note": "Representative clean-run message -- rkhunter's actual clean output format varies by version but always has zero 'Warning:' lines."
+      },
+      {
+        "label": "warnings found",
+        "content": "Warning: The SSH and rkhunter configuration options should be the same:\n         SSH configuration option 'PermitRootLogin': yes\n         rkhunter  configuration option 'ALLOW_SSH_ROOT_USER': no\nWarning: Password less login for user 'testuser' is possible\nWarning: The following user has UID 0 (root) but their login name is not 'root': admin2",
+        "note": "The CATEGORIES shown here (SSH/rkhunter config mismatch, passwordless account, unexpected UID-0 account) were confirmed present in the actual rootkitscan.txt read during the investigation -- the exact usernames and wording above are a reconstruction of that format, not a verbatim capture. Of the three, the UID-0 'admin2' account is the most severe -- it's a functioning backdoor regardless of how it got there."
+      }
+    ]
+  }
+}
