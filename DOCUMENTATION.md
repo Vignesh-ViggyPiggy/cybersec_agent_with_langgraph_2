@@ -395,6 +395,61 @@ mechanism corrections, confirmed-live examples — see that attack type's
 own `corpus_documents/attack_<type>.json`, whose `explanation` field is
 the authoritative source these table rows were summarized from.
 
+### 5.5 The attack corpus — exact lookup vs. semantic query
+
+`corpus_documents/*.json` is the human-editable source of truth (§1.4);
+[`corpus_server.py`](analysis_system/corpus_server.py) is the running
+service in front of it — a `chromadb` `PersistentClient` collection
+(`corpus_db/`) that both `ingest_corpus.py` writes into and
+`attack_status_workflow.py` reads from, over MCP (via
+[`lib/corpus_client.py`](analysis_system/lib/corpus_client.py)).
+
+Two different lookup modes are exposed, and the attack-status workflow
+only ever uses one of them:
+
+- **Exact lookup — the actual hot path.** [`resolve_attack_files_node`](analysis_system/attack_status_workflow.py:327)
+  (§5.1 step 1) calls [`get_attack_entry`](analysis_system/lib/attack_status_data.py:55),
+  which calls [`get_corpus_entry`](analysis_system/corpus_server.py:103)
+  with the exact id `attack_<type>` (e.g. `attack_ransomware`) — a plain
+  Chroma `.get(ids=[id])`, no embedding or similarity search involved.
+  `attack_type` is always a known, already-resolved key at this point (from
+  [`get_enabled_attack_types`](analysis_system/lib/attack_status_data.py:33)),
+  never a free-text query, so there's nothing to search semantically for.
+- **Semantic query — available, but not on this workflow's path.**
+  [`query_corpus`](analysis_system/corpus_server.py:118) embeds free text
+  with `nomic-embed-text` and returns the `n_results` nearest corpus
+  entries by embedding distance. Nothing in `attack_status_workflow.py` or
+  `lib/log_analysis_workflow.py` currently calls it — it exists for
+  future/other consumers, e.g. a not-yet-built contribution workflow
+  checking whether a new proposed entry already resembles an existing one
+  before adding it, or ad-hoc exploration (`python -c "from
+  lib.corpus_client import query_corpus; print(query_corpus('unexpected
+  root account'))"`).
+
+**What `nomic-embed-text` is for, concretely**: it's the embedding model
+[`corpus_server.py`](analysis_system/corpus_server.py:37) uses
+(`OllamaEmbeddings(model=EMBED_MODEL)`, `EMBED_MODEL` defaulting to
+`nomic-embed-text`, override via `CORPUS_EMBED_MODEL`) to turn text into
+vectors for the corpus store — used in exactly two places:
+
+1. [`add_corpus_entry`](analysis_system/corpus_server.py:74) (called by
+   [`ingest_corpus.py`](analysis_system/ingest_corpus.py) for every
+   `corpus_documents/*.json` file) — embeds that entry's `explanation`
+   field once, at ingest time, and stores the resulting vector alongside
+   the id/metadata. Only `explanation` is embedded, never
+   `raw_content_examples` or other metadata — embedding raw XML/log text
+   doesn't help similarity search the way a natural-language description
+   does.
+2. [`query_corpus`](analysis_system/corpus_server.py:118) — embeds the
+   incoming free-text query at request time, then Chroma compares that
+   vector against every stored entry's embedding to rank nearest matches.
+
+It's a separate, smaller model from `cybersecqwen` (§4.2) — one is an
+embedding model for the corpus store, the other is the chat model that
+does every actual classification/explanation call in the pipeline — which
+is why installing/setting up this pipeline needs `ollama pull
+nomic-embed-text` even though it never appears in a prompt or a report.
+
 ---
 
 ## 6. Log analysis — step by step
