@@ -323,16 +323,24 @@ cp .env.example .env                                 # then edit ANALYSIS_SERVER
 
 ```bash
 # vault machine
-python mcp_server.py                    # :8002 -- serves file reads/writes to the analysis machine
+python mcp_server.py    # :8002 -- serves file reads/writes to the analysis machine
 
-# analysis machine
-python trigger_mcp_server.py            # :8001 -- accepts "analyze this hierarchy" requests
-# (corpus_server.py from §2 must already be running, :8003)
+# analysis machine -- use start.sh rather than starting each process by hand
+cd analysis_system
+./start.sh               # starts corpus_server.py, then trigger_mcp_server.py, in the background
 ```
 
-Or, packaged: `hierarchy_system`'s `mcp_server.py` directly; `analysis_system`'s
-`start.sh` (starts `corpus_server.py` then `trigger_mcp_server.py` in the
-background, PID files for both).
+`start.sh` (installed by `analysis_system/install.sh`, §2.1) writes
+`corpus_server.pid`/`trigger_mcp_server.pid` and waits between the two
+starts so `trigger_mcp_server.py` doesn't come up before the corpus store
+it depends on is ready; stop both with `kill $(cat corpus_server.pid)
+$(cat trigger_mcp_server.pid)`. If you're working from a manual/dev setup
+(§2.2) without `start.sh` in place, the equivalent by hand is:
+
+```bash
+python corpus_server.py &               # :8003 -- start first
+python trigger_mcp_server.py            # :8001 -- accepts "analyze this hierarchy" requests
+```
 
 **Trigger an analysis** — three equivalent ways:
 
