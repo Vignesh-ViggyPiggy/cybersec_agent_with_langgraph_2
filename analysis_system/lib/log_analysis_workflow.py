@@ -698,8 +698,6 @@ def _render_incident_section(incident_type: str, is_primary: bool,
 
     if is_primary:
         lines.append(_render_search_results_section(search_results))
-    else:
-        lines.append("\n_Search skipped for secondary incidents — assessed from the initial classification only._")
 
     return "\n".join(lines) + "\n"
 
