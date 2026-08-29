@@ -153,11 +153,11 @@ class InitialSearchFromLogsToDatasetTemplate(BaseModel):
 
 
 class QuestionFormerOutputTemplate(BaseModel):
-    search_query_1: str = Field(description="A search query to find more information about the attack or potential attack")
-    search_query_2: str = Field(description="Another search query to find more information about the attack or potential attack")
-    search_query_3: str = Field(description="Another search query to find more information about the attack or potential attack")
-    search_query_4: str = Field(description="Another search query to find more information about the attack or potential attack")
-    search_query_5: str = Field(description="Another search query to find more information about the attack or potential attack")
+    search_query_1: str = Field(description="A search query describing the incident/technique itself in plain, general terms — what happened and how it's typically carried out")
+    search_query_2: str = Field(description="Another search query describing the incident/technique itself, from a different angle (e.g. the attacker's likely objective or method)")
+    search_query_3: str = Field(description="A search query targeted at a named threat-intelligence source (MITRE ATT&CK, CISA advisories, or NVD/CVE) — use a site: operator for that source's domain when there's a specific technique/CVE angle to search for")
+    search_query_4: str = Field(description="Another threat-intelligence-source-targeted search query, aimed at a different named source than search_query_3")
+    search_query_5: str = Field(description="Another threat-intelligence-source-targeted search query, aimed at a different named source than search_query_3 and search_query_4")
 
 
 class SecondaryIncidentTemplate(BaseModel):
@@ -538,10 +538,16 @@ def _form_search_queries(title: str, content: str, incident_type: str) -> list[s
     template = ChatPromptTemplate.from_messages([
         ("system", "You are a cybersecurity analyst. Based on the incident title and analysis below, "
                    "generate 5 search queries to find more information about this attack or potential attack.\n\n"
-                   "IMPORTANT: Phrase each query around the general security technique or concept described "
-                   "— do not use internal or proprietary system field names, product names, or file paths "
-                   "specific to this environment, those won't return useful public results. Every query must "
-                   "be traceable to something the title or analysis actually says." + incident_type_hint),
+                   "The first two queries should simply describe the incident/technique itself in plain, "
+                   "general terms — what happened and how it's typically carried out. The other three should "
+                   "each be targeted at a specific named threat-intelligence source — MITRE ATT&CK, CISA "
+                   "advisories, NVD/CVE — phrased to surface pages from that source specifically (e.g. using "
+                   "a site: operator such as site:attack.mitre.org, site:cisa.gov, or site:nvd.nist.gov) when "
+                   "there's a concrete technique/CVE angle to search for.\n\n"
+                   "IMPORTANT: Do not use internal or proprietary system field names, product names, or file "
+                   "paths specific to this environment in any query — those won't return useful public "
+                   "results. Every query must be traceable to something the title or analysis actually says."
+                   + incident_type_hint),
         ("user", "Title: {title}\n\nAnalysis: {content}")
     ])
     try:
@@ -641,8 +647,36 @@ def _demote_embedded_headers(text: str) -> str:
     return "\n".join(lines)
 
 
+def _render_search_results_section(search_results: list[dict]) -> str:
+    """Renders the actual DDG results collected for this incident (not the
+    LLM-echoed copy on ExplainerOutputTemplate.search_results, which is
+    unvalidated model output) — grouped under the query that produced them,
+    like the old pipeline showed its search results in the report."""
+    if not search_results:
+        return "\n**Search results:** none returned for this incident's queries.\n"
+
+    by_query: dict[int, list[dict]] = {}
+    query_text: dict[int, str] = {}
+    for r in search_results:
+        qn = r.get("query_number")
+        by_query.setdefault(qn, []).append(r)
+        query_text[qn] = r.get("query", "")
+
+    lines = ["\n**Search results:**"]
+    for qn in sorted(by_query, key=lambda x: (x is None, x)):
+        lines.append(f"\n_Query: {query_text[qn]}_")
+        for r in by_query[qn]:
+            title = r.get("title") or "No title"
+            url = r.get("url", "")
+            snippet = r.get("snippet", "")
+            entry = f"[{title}]({url})" if url else title
+            lines.append(f"- {entry} — {snippet}")
+    return "\n".join(lines) + "\n"
+
+
 def _render_incident_section(incident_type: str, is_primary: bool,
-                              explainer: ExplainerOutputTemplate | None) -> str:
+                              explainer: ExplainerOutputTemplate | None,
+                              search_results: list[dict]) -> str:
     label = incident_type.replace("_", " ").title()
     role = "Primary incident" if is_primary else "Secondary incident"
     lines = [f"## {label}", "", f"<!-- {STATUS_MARKER}: {incident_type} -->", f"**{role}**"]
@@ -656,6 +690,8 @@ def _render_incident_section(incident_type: str, is_primary: bool,
             lines.append("\n**Recommended actions:**")
             for action in explainer.recommended_actions:
                 lines.append(f"- {action}")
+
+    lines.append(_render_search_results_section(search_results))
 
     return "\n".join(lines) + "\n"
 
@@ -774,7 +810,7 @@ def run_log_analysis_loop(hierarchy: str, hierarchies_dir: Path, report_path: Pa
         queries = _form_search_queries(title, content, incident_type)
         search_results = _run_ddg_search(queries) if queries else []
         explainer = _explain_incident(title, content, incident_type, search_results)
-        section = _render_incident_section(incident_type, is_primary, explainer)
+        section = _render_incident_section(incident_type, is_primary, explainer, search_results)
 
         with open(report_path, "a", encoding="utf-8") as f:
             f.write(section + "\n")
