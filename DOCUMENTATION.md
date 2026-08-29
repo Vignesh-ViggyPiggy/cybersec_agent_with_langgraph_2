@@ -156,7 +156,7 @@ read by the attack-status graph):
 ## 2. Installation
 
 Full detail (Rocky Linux 8 + Windows installers, tar packaging) is in
-[README.md §8](README.md#8-packaging-and-installing). Summary:
+[README.md's Packaging and installing section](README.md#packaging-and-installing). Summary:
 
 ### 2.1 Packaged install (recommended for a real deployment)
 
