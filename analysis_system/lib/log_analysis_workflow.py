@@ -19,11 +19,14 @@ checks:
      (_classify_once), producing a title, a primary incident_type, and a
      list of secondary_incident_types.
   2. Discard the raw log text — nothing after step 1 ever sees it again.
-  3. For EACH incident (the primary, and each secondary, all treated equally
-     — no "primary gets full treatment, secondary gets an afterthought"
-     asymmetry), run an ISOLATED sequence: search queries -> DDG search ->
-     explain -> render one markdown section -> append to the report ->
-     discard. Exactly the same
+  3. For EACH incident (the primary, and each secondary), run an ISOLATED
+     sequence: search queries -> DDG search -> explain -> render one
+     markdown section -> append to the report -> discard. The search step
+     (queries + DDG) only runs for the PRIMARY incident — secondary
+     incidents skip straight to explain, assessed from the classification
+     alone, since giving every secondary finding the same web-search pass
+     as the primary was a real cost/latency multiplier for comparatively
+     low value. Exactly the same
      invoke-fresh/append/discard shape run_attack_status_loop already uses
      for its attack types, just applied to a small number of log-derived
      incidents instead of a fixed taxonomy.
@@ -581,9 +584,11 @@ def _run_ddg_search(queries: list[str]) -> list[dict]:
 def _explain_incident(title: str, content: str, incident_type: str,
                        search_results: list[dict]) -> ExplainerOutputTemplate | None:
     """Same calibration guidance as the old ExplainerOutputNode, but for
-    exactly ONE incident at a time — every incident, primary or secondary,
-    gets this same full treatment, no asymmetric primary-vs-secondary
-    split. Scoped to title/content/search results — never the raw logs."""
+    exactly ONE incident at a time. Scoped to title/content/search results —
+    never the raw logs. search_results is empty for secondary incidents
+    (search is skipped for those, see run_log_analysis_loop) — the prompt
+    already degrades gracefully to "No search results available." in that
+    case."""
     structured_model = model.with_structured_output(ExplainerOutputTemplate)
     search_context = "\n\n".join([
         f"Query {sr.get('query_number')}: {sr.get('query')}\n"
@@ -691,7 +696,10 @@ def _render_incident_section(incident_type: str, is_primary: bool,
             for action in explainer.recommended_actions:
                 lines.append(f"- {action}")
 
-    lines.append(_render_search_results_section(search_results))
+    if is_primary:
+        lines.append(_render_search_results_section(search_results))
+    else:
+        lines.append("\n_Search skipped for secondary incidents — assessed from the initial classification only._")
 
     return "\n".join(lines) + "\n"
 
@@ -807,8 +815,11 @@ def run_log_analysis_loop(hierarchy: str, hierarchies_dir: Path, report_path: Pa
     for incident_type, is_primary in incidents:
         print(f"\n{'='*70}\nProcessing incident: {incident_type} ({'primary' if is_primary else 'secondary'})\n{'='*70}")
 
-        queries = _form_search_queries(title, content, incident_type)
-        search_results = _run_ddg_search(queries) if queries else []
+        if is_primary:
+            queries = _form_search_queries(title, content, incident_type)
+            search_results = _run_ddg_search(queries) if queries else []
+        else:
+            search_results = []
         explainer = _explain_incident(title, content, incident_type, search_results)
         section = _render_incident_section(incident_type, is_primary, explainer, search_results)
 
