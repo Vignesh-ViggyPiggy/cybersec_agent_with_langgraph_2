@@ -8,10 +8,10 @@ earlier nodes already produced (title, incident type, dataset examples,
 search results) — so token count, cost, and latency all grew with every step
 in a single run, worst at the end.
 
-This module keeps that pipeline's real domain logic (dataset-example
-matching, the classification prompt's rule-based-hint handling, self-
-consistency voting on cold classification, threat-level calibration —
-extracted here rather than re-derived) but restructures the CONTROL FLOW the
+This module keeps that pipeline's real domain logic (the classification
+prompt's rule-based-hint handling, self-consistency voting on cold
+classification, threat-level calibration — extracted here rather than
+re-derived) but restructures the CONTROL FLOW the
 same way attack_status_workflow.py already restructured the per-attack
 checks:
 
@@ -21,9 +21,9 @@ checks:
   2. Discard the raw log text — nothing after step 1 ever sees it again.
   3. For EACH incident (the primary, and each secondary, all treated equally
      — no "primary gets full treatment, secondary gets an afterthought"
-     asymmetry), run an ISOLATED sequence: dataset examples -> search
-     queries -> DDG search -> explain -> render one markdown section ->
-     append to the report -> discard. Exactly the same
+     asymmetry), run an ISOLATED sequence: search queries -> DDG search ->
+     explain -> render one markdown section -> append to the report ->
+     discard. Exactly the same
      invoke-fresh/append/discard shape run_attack_status_loop already uses
      for its attack types, just applied to a small number of log-derived
      incidents instead of a fixed taxonomy.
@@ -77,42 +77,6 @@ CLEAN_RUN_MARKER = "No log files found in this pull."
 # rule-based-hint handling and self-consistency voting were both confirmed
 # to matter there and are kept exactly as validated.
 
-def _load_incident_types_from_datasets() -> List[str]:
-    """Load incident types dynamically from merged dataset JSON files."""
-    datasets_dir = Path(__file__).parent.parent / "datasets_files"
-    discovered_types = set()
-
-    if datasets_dir.exists() and datasets_dir.is_dir():
-        for json_file in datasets_dir.glob("*.json"):
-            try:
-                with open(json_file, "r", encoding="utf-8") as f:
-                    payload = json.load(f)
-                if isinstance(payload, list):
-                    for item in payload:
-                        if isinstance(item, dict):
-                            raw_type = item.get("incident_type")
-                            if isinstance(raw_type, str) and raw_type.strip():
-                                discovered_types.add(raw_type.strip())
-            except Exception:
-                # Ignore malformed files so one bad file doesn't block workflow startup.
-                continue
-
-    # Stable fallback taxonomy if dataset files are absent/empty at startup.
-    if not discovered_types:
-        discovered_types = {
-            "banned_ip",
-            "data_exfiltration",
-            "disk_full",
-            "memory_leak",
-            "privilege_escalation",
-            "sql_injection",
-            "table_deletion",
-            "user_breach",
-        }
-
-    return sorted(discovered_types)
-
-
 # This workflow classifies exactly three log sources: /var/log/secure,
 # /var/log/messages, and /var/log/audit/audit.log — so the taxonomy is
 # restricted to only the incident types actually detectable from THOSE
@@ -140,7 +104,7 @@ ALLOWED_INCIDENT_TYPES = {
     "network_anomaly",              # /var/log/messages: kernel/network-daemon messages (weakest evidence of this group)
 }
 
-INCIDENT_TYPES = [t for t in _load_incident_types_from_datasets() if t in ALLOWED_INCIDENT_TYPES]
+INCIDENT_TYPES = sorted(ALLOWED_INCIDENT_TYPES)
 INCIDENT_TYPES_SET = set(INCIDENT_TYPES)
 NONE_APPLICABLE_INCIDENT_TYPE = "none_applicable"
 INCIDENT_TYPES_WITH_FALLBACK = sorted(INCIDENT_TYPES_SET.union({NONE_APPLICABLE_INCIDENT_TYPE}))
@@ -307,62 +271,10 @@ def _normalize_initial_search_payload(payload: dict) -> dict:
     return out
 
 
-def _load_examples_for_incident_type(incident_type: str) -> List[dict]:
-    """Load dataset records matching the provided incident type from all dataset files."""
-    if incident_type == NONE_APPLICABLE_INCIDENT_TYPE:
-        return []
-    datasets_dir = Path(__file__).parent.parent / "datasets_files"
-    matched_examples = []
-    if not datasets_dir.exists() or not datasets_dir.is_dir():
-        return matched_examples
-    for json_file in sorted(datasets_dir.glob("*.json")):
-        try:
-            with open(json_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except Exception:
-            continue
-        if not isinstance(payload, list):
-            continue
-        for index, item in enumerate(payload, start=1):
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("incident_type", "")).strip() != incident_type:
-                continue
-            example = dict(item)
-            example["source_file"] = json_file.name
-            example["source_index"] = index
-            matched_examples.append(example)
-    return matched_examples
-
-
 def _format_step_label(step: int, message: str, total_steps: int | None = None) -> str:
     if total_steps is None:
         return f"[STEP {step}] {message}"
     return f"[STEP {step}/{total_steps}] {message}"
-
-
-def _build_explainer_reference_examples(examples: List[dict], max_examples: int = 5) -> str:
-    """Build compact dataset-style examples for explainer reasoning guidance."""
-    if not isinstance(examples, list) or not examples:
-        return "No matched dataset examples available."
-    lines = ["Reference examples for incident-style reasoning:"]
-    for idx, ex in enumerate(examples[:max_examples], start=1):
-        if not isinstance(ex, dict):
-            continue
-        title = str(ex.get("title") or ex.get("incident_title") or "Untitled incident").strip()
-        description = str(ex.get("description", "")).strip()
-        if len(description) > 260:
-            description = description[:260].rstrip() + "..."
-        vectors = ex.get("vectors", [])
-        vectors_text = ", ".join(str(v).strip() for v in vectors[:5]) if isinstance(vectors, list) else "N/A"
-        lines.append(f"Example {idx}:")
-        lines.append(f"- Incident: {title}")
-        if description:
-            lines.append(f"- Typical pattern/outcome: {description}")
-        lines.append(f"- Common indicators: {vectors_text}")
-    if len(examples) > max_examples:
-        lines.append(f"... plus {len(examples) - max_examples} additional matched examples")
-    return "\n".join(lines)
 
 
 def InitialAnalysisNode(state: MessageState) -> MessageState:
@@ -611,8 +523,7 @@ def _classify_once(logs_content: str, logs_file: Path, output_dir: Path, custome
 
 # ── Phase 2: isolated per-incident processing ──────────────────────────────
 # None of this ever sees the raw log text — only the title/content/
-# incident_type extracted above, plus this incident's own dataset examples
-# and search results.
+# incident_type extracted above, plus this incident's own search results.
 
 def _form_search_queries(title: str, content: str, incident_type: str) -> list[str]:
     """Same intent as the old QuestionFormerNode (5 queries phrased around
@@ -661,15 +572,13 @@ def _run_ddg_search(queries: list[str]) -> list[dict]:
     return all_results
 
 
-def _explain_incident(title: str, content: str, incident_type: str, dataset_examples: list[dict],
+def _explain_incident(title: str, content: str, incident_type: str,
                        search_results: list[dict]) -> ExplainerOutputTemplate | None:
-    """Same calibration guidance and reference-example grounding as the old
-    ExplainerOutputNode, but for exactly ONE incident at a time — every
-    incident, primary or secondary, gets this same full treatment, no
-    asymmetric primary-vs-secondary split. Scoped to title/content/search
-    results — never the raw logs."""
+    """Same calibration guidance as the old ExplainerOutputNode, but for
+    exactly ONE incident at a time — every incident, primary or secondary,
+    gets this same full treatment, no asymmetric primary-vs-secondary
+    split. Scoped to title/content/search results — never the raw logs."""
     structured_model = model.with_structured_output(ExplainerOutputTemplate)
-    reference_examples = _build_explainer_reference_examples(dataset_examples)
     search_context = "\n\n".join([
         f"Query {sr.get('query_number')}: {sr.get('query')}\n"
         f"Title: {sr.get('title', 'N/A')}\nURL: {sr.get('url', 'N/A')}\nSnippet: {sr.get('snippet', 'N/A')}"
@@ -679,7 +588,7 @@ def _explain_incident(title: str, content: str, incident_type: str, dataset_exam
     template = ChatPromptTemplate.from_messages([
         ("system", """You are a senior cybersecurity analyst.
 
-Use the reference incident examples as archetypes for how incidents are described and reasoned about. Explain this one incident in a dataset-like narrative style, grounded in the title/analysis and search intelligence given — do not invent details not supported by them.
+Explain this one incident in a clear analyst narrative style, grounded in the title/analysis and search intelligence given — do not invent details not supported by them.
 
 The search results are general background intelligence about how an attack technique of this kind typically works — they are NOT a report of what was observed on this specific system. Never phrase something from a search result as if it was directly observed.
 
@@ -696,9 +605,6 @@ Write detailed_analysis as plain paragraphs — do NOT use markdown headers (#, 
 Content: {content}
 Incident type: {incident_type}
 
-Reference Incident Examples (for reasoning style):
-{reference_examples}
-
 Threat Intelligence from Search Results:
 {search_context}
 
@@ -707,7 +613,7 @@ Provide your detailed security analysis for this one incident.""")
     try:
         return (template | structured_model).invoke({
             "title": title, "content": content, "incident_type": incident_type,
-            "reference_examples": reference_examples, "search_context": search_context,
+            "search_context": search_context,
         })
     except Exception as e:
         print(f"  ⚠ Explanation generation failed for '{incident_type}': {e}")
@@ -736,11 +642,10 @@ def _demote_embedded_headers(text: str) -> str:
 
 
 def _render_incident_section(incident_type: str, is_primary: bool,
-                              examples_count: int, explainer: ExplainerOutputTemplate | None) -> str:
+                              explainer: ExplainerOutputTemplate | None) -> str:
     label = incident_type.replace("_", " ").title()
     role = "Primary incident" if is_primary else "Secondary incident"
     lines = [f"## {label}", "", f"<!-- {STATUS_MARKER}: {incident_type} -->", f"**{role}**"]
-    lines.append(f"\n_Matched {examples_count} reference example(s) from the incident dataset._")
 
     if explainer is None:
         lines.append("\n⚠ Detailed explanation could not be generated for this incident (see logs).")
@@ -866,18 +771,17 @@ def run_log_analysis_loop(hierarchy: str, hierarchies_dir: Path, report_path: Pa
     for incident_type, is_primary in incidents:
         print(f"\n{'='*70}\nProcessing incident: {incident_type} ({'primary' if is_primary else 'secondary'})\n{'='*70}")
 
-        examples = _load_examples_for_incident_type(incident_type)
         queries = _form_search_queries(title, content, incident_type)
         search_results = _run_ddg_search(queries) if queries else []
-        explainer = _explain_incident(title, content, incident_type, examples, search_results)
-        section = _render_incident_section(incident_type, is_primary, len(examples), explainer)
+        explainer = _explain_incident(title, content, incident_type, search_results)
+        section = _render_incident_section(incident_type, is_primary, explainer)
 
         with open(report_path, "a", encoding="utf-8") as f:
             f.write(section + "\n")
         processed += 1
-        # `examples`, `queries`, `search_results`, `explainer`, `section` all
-        # go out of scope here — nothing from this incident carries into the
-        # next iteration except what's already been written to disk.
+        # `queries`, `search_results`, `explainer`, `section` all go out of
+        # scope here — nothing from this incident carries into the next
+        # iteration except what's already been written to disk.
 
     return {"incident_count": processed, "logs_file": str(logs_file)}
 

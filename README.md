@@ -22,7 +22,6 @@ cybersec_agent_with_langgraph/
     ├── mcp_client.py           # client helpers (pull/push files via MCP)
     ├── populate_hierarchies.py # standalone manual-pull script
     ├── trigger_mcp_server.py   # FastMCP server: accepts "analyze this hierarchy"
-    ├── datasets_files/         # merged incident datasets used for classification
     ├── hierarchies/            # local working dir (git-ignored — pulled data + reports)
     ├── requirements.txt
     └── .env.example
@@ -161,7 +160,6 @@ For each analyzed hierarchy, written back into the same folder (and pushed to th
 - **`trigger_mcp_client.py` hangs or errors** — confirm `trigger_mcp_server.py` is actually running on the analysis machine and `ANALYSIS_SERVER_URL` in the vault's `.env` points at it correctly.
 - **`populate_hierarchies.py` / `anomaly_workflow.py` report "No files returned"** — confirm `mcp_server.py` is running on the vault machine, `MCP_SERVER_URL` in the analysis machine's `.env` points at it, and the hierarchy path actually exists under `rationalVault/data/` there.
 - **Empty or weak analysis output** — verify Ollama model availability on the analysis machine and internet access for search enrichment.
-- **Dataset routing seems off** — check `datasets_files/*.json` contains valid `incident_type` fields matching what `anomaly_workflow.py`'s category tagging produces.
 - **Report threat_level always high/critical** — should be fixed by the calibration rubric in `ExplainerOutputNode`'s prompt; if you still see this, check the model is actually reaching that code path rather than falling back to the strict-JSON retry path.
 
 ## 8. Packaging and installing
