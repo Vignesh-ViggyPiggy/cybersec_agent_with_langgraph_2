@@ -16,8 +16,7 @@ this document goes one level deeper into the analysis pipeline itself.
 One run processes one hierarchy path (e.g. `5/101/1/4/1`) end to end:
 pull that hierarchy's files from the vault, run every enabled attack-type
 check, run the secure/messages/audit.log catch-all, write one combined
-markdown report, push it back to the vault. Entry point:
-[`run_full_workflow`](analysis_system/attack_status_workflow.py:992).
+markdown report, push it back to the vault.
 
 ```mermaid
 flowchart TD
@@ -28,6 +27,59 @@ flowchart TD
     C --> E["parse_deterministic_summary()\n+ render_summary_block()\n(regex count, no LLM call)"]
     E --> F["run_log_analysis_loop()\n(see 1.3)"]
     F --> G["send_files() -- push finished\nreport back to the vault"]
+```
+
+The top-level driver, in `analysis_system/attack_status_workflow.py`:
+
+```python
+def run_full_workflow(
+    hierarchy: str,
+    vault_root: str = DEFAULT_VAULT_ROOT,
+    hierarchies_dir: Path = DEFAULT_HIERARCHIES_DIR,
+    sync_with_vault: bool = True,
+) -> dict:
+    hierarchy_clean = hierarchy.strip("/\\")
+
+    # Pull this hierarchy's vault data down to a local working copy via MCP.
+    # sync_with_vault=False skips this (and the push-back at the end) for
+    # local testing against a filesystem path that's already local.
+    if sync_with_vault:
+        print(f"Pulling {vault_root}/{hierarchy_clean} -> {hierarchies_dir / hierarchy_clean} ...")
+        populate_hierarchies(vault_root, hierarchies_dir, hierarchy_clean)
+
+    reports_dir = hierarchies_dir / hierarchy_clean / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_path = reports_dir / f"attack_status_report_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.md"
+
+    local_root = str(hierarchies_dir) if sync_with_vault else vault_root
+    run_attack_status_loop(hierarchy, local_root, report_path)
+
+    summary_counts = parse_deterministic_summary(report_path)
+    with open(report_path, "a", encoding="utf-8") as f:
+        f.write(render_summary_block(summary_counts))
+
+    # Catch-all: secure/messages/audit.log, appended into THIS SAME report.
+    # Always runs, after the attack checks -- not opt-in.
+    from lib.log_analysis_workflow import run_log_analysis_loop
+    log_analysis_result = run_log_analysis_loop(hierarchy, Path(local_root), report_path)
+
+    # Push the finished report back up to the vault, alongside the source
+    # files it was generated from.
+    vault_upload_result = None
+    if sync_with_vault:
+        vault_upload_result = send_files(
+            str(report_path), "upload_file",
+            relative_path=f"{hierarchy_clean}/reports/{report_path.name}",
+        )
+        print(f"Uploaded report to vault: {vault_upload_result}")
+
+    return {
+        "hierarchy": hierarchy,
+        "report_path": str(report_path),
+        "summary_counts": summary_counts,
+        "log_analysis": log_analysis_result,
+        "vault_upload_result": vault_upload_result,
+    }
 ```
 
 Both the per-attack loop and the log-analysis loop are deliberately
@@ -43,11 +95,9 @@ run progresses.
 ### 1.2 Per-attack-type graph
 
 Every attack type — `ransomware`, `user_breach`, `config_drift`, all 23 —
-runs through the exact same compiled LangGraph
-([`build_attack_graph`](analysis_system/attack_status_workflow.py:862)),
-just parameterized by that attack type's own corpus entry. This is the
-one graph diagram that applies to all of them; §5 covers what's different
-per attack type.
+runs through the exact same compiled LangGraph, just parameterized by that
+attack type's own corpus entry. This is the one graph diagram that applies
+to all of them; §5 covers what's different per attack type.
 
 ```mermaid
 flowchart TD
@@ -74,6 +124,62 @@ flowchart TD
     render --> done(["append section to report,\ndiscard this attack's state"])
 ```
 
+The graph assembly itself, in `analysis_system/attack_status_workflow.py`:
+
+```python
+def build_attack_graph():
+    workflow = StateGraph(AttackState)
+
+    workflow.add_node("resolve", resolve_attack_files_node)
+    workflow.add_node("read_status", read_live_status_node)
+    workflow.add_node("detected", detected_path_node)
+    workflow.add_node("unverifiable", unverifiable_path_node)
+    workflow.add_node("cannot_determine", cannot_determine_node)
+    workflow.add_node("not_configured", not_configured_node)
+    workflow.add_node("verify", verify_against_raw_evidence_node)
+    workflow.add_node("verify_raw_logs", verify_against_raw_logs_node)
+    workflow.add_node("not_detected_clean", not_detected_clean_node)
+    workflow.add_node("discrepancy", discrepancy_node)
+    workflow.add_node("attack_info", attack_info_node)
+    workflow.add_node("render", render_markdown_section_node)
+
+    workflow.set_entry_point("resolve")
+
+    workflow.add_conditional_edges("resolve", route_after_resolve, {
+        "cannot_determine": "cannot_determine",
+        "read_status": "read_status",
+    })
+
+    workflow.add_conditional_edges("read_status", route_from_status_check, {
+        "detected": "detected",
+        "verify": "verify",
+        "verify_raw_logs": "verify_raw_logs",
+        "unverifiable": "unverifiable",
+        "not_configured": "not_configured",
+    })
+
+    workflow.add_conditional_edges("verify", route_after_verification, {
+        "discrepancy": "discrepancy",
+        "confirmed_clean": "not_detected_clean",
+    })
+
+    workflow.add_conditional_edges("verify_raw_logs", route_after_verification, {
+        "discrepancy": "discrepancy",
+        "confirmed_clean": "not_detected_clean",
+    })
+
+    workflow.add_edge("detected", "attack_info")
+    workflow.add_edge("discrepancy", "attack_info")
+    workflow.add_edge("attack_info", "render")
+    workflow.add_edge("not_detected_clean", "render")
+    workflow.add_edge("unverifiable", "render")
+    workflow.add_edge("cannot_determine", "render")
+    workflow.add_edge("not_configured", "render")
+    workflow.add_edge("render", END)
+
+    return workflow.compile()
+```
+
 Six possible `final_status` outcomes come out of this graph:
 `detected`, `discrepancy`, `not_detected`, `not_detected_unverifiable`,
 `not_configured`, `cannot_determine` — see §5.1 for what each means and
@@ -83,8 +189,7 @@ which node sets it.
 
 Runs once, after every attack type has been checked, reading
 `var/log/{messages,secure,audit.log}` from the **same already-pulled local
-copy** (no second vault fetch). Entry point:
-[`run_log_analysis_loop`](analysis_system/lib/log_analysis_workflow.py:734).
+copy** (no second vault fetch). Full step-by-step code in §6.
 
 ```mermaid
 flowchart TD
@@ -105,8 +210,7 @@ flowchart TD
 ### 1.4 Input files required
 
 **From the vault, per hierarchy** (pulled locally by
-[`populate_hierarchies`](analysis_system/lib/populate_hierarchies.py),
-read by the attack-status graph):
+`lib/populate_hierarchies.py`, read by the attack-status graph):
 
 | File (relative to the hierarchy root) | Used by |
 |---|---|
@@ -125,9 +229,9 @@ read by the attack-status graph):
 
 | File | Used by |
 |---|---|
-| `corpus_documents/attack_*.json` (23 files) + reference-file entries | Ingested into `corpus_db/` by [`ingest_corpus.py`](analysis_system/ingest_corpus.py) — every attack type's `status_file`/`status_tag`/`value_schema`/etc. comes from here, not a flat config file |
+| `corpus_documents/attack_*.json` (23 files) + reference-file entries | Ingested into `corpus_db/` by `ingest_corpus.py` — every attack type's `status_file`/`status_tag`/`value_schema`/etc. comes from here, not a flat config file |
 | `analysis_system/model/Modelfile` + `cybersecqwen.gguf` | Builds the local Ollama model (see §4.2) |
-| `analysis_system/.env` | `MCP_SERVER_URL`, `LOG_FILE_PATHS`, `LOG_TAIL_LINES`, `CLASSIFICATION_VOTE_COUNT`, `ENABLED_ATTACK_TYPES`, `CORPUS_SERVER_URL` — see [.env.example](analysis_system/.env.example) |
+| `analysis_system/.env` | `MCP_SERVER_URL`, `LOG_FILE_PATHS`, `LOG_TAIL_LINES`, `CLASSIFICATION_VOTE_COUNT`, `ENABLED_ATTACK_TYPES`, `CORPUS_SERVER_URL` — see `.env.example` |
 | `hierarchy_system/.env` | `ANALYSIS_SERVER_URL`, optional `DATA_ROOT` |
 
 ### 1.5 Brief working
@@ -180,13 +284,13 @@ cd analysis_system                  # or hierarchy_system
 ./install.sh                        # sudo ./install.sh on Rocky Linux 8
 ```
 
-[`analysis_system/install.sh`](analysis_system/install.sh) detects the
-platform (Rocky/RHEL via `dnf`, or Windows via `winget` under Git Bash),
-installs Python 3.11 + a venv + `requirements.txt`, installs Ollama,
-builds `cybersecqwen` from the bundled `model/Modelfile`, and ingests
-`corpus_documents/*.json` into the vector store via a temporarily-started
-`corpus_server.py`. [`hierarchy_system/install.sh`](hierarchy_system/install.sh)
-does the same Python/venv/requirements setup only (no Ollama needed there).
+`analysis_system/install.sh` detects the platform (Rocky/RHEL via `dnf`,
+or Windows via `winget` under Git Bash), installs Python 3.11 + a venv +
+`requirements.txt`, installs Ollama, builds `cybersecqwen` from the
+bundled `model/Modelfile`, and ingests `corpus_documents/*.json` into the
+vector store via a temporarily-started `corpus_server.py`.
+`hierarchy_system/install.sh` does the same Python/venv/requirements setup
+only (no Ollama needed there).
 
 ### 2.2 Manual / development setup
 
@@ -227,8 +331,8 @@ python trigger_mcp_server.py            # :8001 -- accepts "analyze this hierarc
 ```
 
 Or, packaged: `hierarchy_system`'s `mcp_server.py` directly; `analysis_system`'s
-[`start.sh`](analysis_system/start.sh) (starts `corpus_server.py` then
-`trigger_mcp_server.py` in the background, PID files for both).
+`start.sh` (starts `corpus_server.py` then `trigger_mcp_server.py` in the
+background, PID files for both).
 
 **Trigger an analysis** — three equivalent ways:
 
@@ -258,9 +362,9 @@ sections, then the log-analysis section, then the summary block).
 
 | Library | Used for |
 |---|---|
-| `langgraph` | `StateGraph`/`END` — the per-attack graph in [attack_status_workflow.py](analysis_system/attack_status_workflow.py) |
+| `langgraph` | `StateGraph`/`END` — the per-attack graph in `attack_status_workflow.py` |
 | `langchain-core` | `ChatPromptTemplate` — every LLM prompt in both workflows |
-| `langchain-ollama` | `ChatOllama` (the LLM client, [lib/llm_client.py](analysis_system/lib/llm_client.py)) and `OllamaEmbeddings` ([corpus_server.py](analysis_system/corpus_server.py)) |
+| `langchain-ollama` | `ChatOllama` (the LLM client, `lib/llm_client.py`) and `OllamaEmbeddings` (`corpus_server.py`) |
 | `pydantic` | `BaseModel`/`Field` — every structured-output schema (`EvidenceVerificationResult`, `InitialAnalysisTemplate`, `ExplainerOutputTemplate`, etc.) |
 | `ddgs` | `DDGS().text(...)` — DuckDuckGo search, used by `attack_info_node` and `_run_ddg_search` |
 | `fastmcp` | `FastMCP`/`Client` — every MCP server (`mcp_server.py`, `trigger_mcp_server.py`, `corpus_server.py`) and client (`mcp_client.py`, `corpus_client.py`, `trigger_mcp_client.py`) |
@@ -273,7 +377,7 @@ The pipeline uses one local Ollama chat model (default name `cybersecqwen`,
 override via `MODEL_NAME`) plus one embedding model (`nomic-embed-text`,
 fixed, override via `CORPUS_EMBED_MODEL`).
 
-`cybersecqwen` is defined by [`analysis_system/model/Modelfile`](analysis_system/model/Modelfile):
+`cybersecqwen` is defined by `analysis_system/model/Modelfile`:
 
 ```
 FROM ./cybersecqwen.gguf
@@ -295,19 +399,39 @@ creative variation — this is a detection pipeline, not a chat assistant.
 (§1.4) matters for the log-analysis classification step specifically —
 that's the one call still carrying full raw log text.
 
-The `.gguf` weights are not committed to git (multi-gigabyte binary) — they're
-produced from whatever Ollama already has built locally by
-[`scripts/export_model.sh`](scripts/export_model.sh), which copies the real
-weight blob out of Ollama's own blob store and rewrites the `Modelfile`'s
-`FROM` line to point at the bundled relative file instead of a
-machine-local path.
+The `.gguf` weights are not committed to git (multi-gigabyte binary) —
+they're produced from whatever Ollama already has built locally by
+`scripts/export_model.sh`, which copies the real weight blob out of
+Ollama's own blob store and rewrites the `Modelfile`'s `FROM` line to
+point at the bundled relative file instead of a machine-local path.
 
-The single shared client instance lives in
-[`lib/llm_client.py`](analysis_system/lib/llm_client.py):
-`MODEL_REQUEST_TIMEOUT_SECONDS` (default 120s) bounds a single call so a
-stuck/overloaded Ollama request fails with a clear exception instead of
-hanging forever; `MODEL_NUM_GPU` (unset by default) can force pure-CPU
-inference for A/B testing against GPU-assisted inference.
+The single shared client instance, `analysis_system/lib/llm_client.py`:
+
+```python
+import os
+from langchain_ollama import ChatOllama
+
+# Without an explicit request timeout, a stuck/overloaded Ollama call blocks
+# forever with no signal to distinguish "slow" from "hung" -- this bounds it
+# so a genuinely stuck call fails with a clear exception instead.
+MODEL_REQUEST_TIMEOUT_SECONDS = float(os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", "120"))
+
+# Set MODEL_NUM_GPU=0 to force pure CPU inference, for a controlled A/B test
+# against the default GPU-assisted path -- a model that doesn't fully fit in
+# VRAM gets split across GPU+CPU by Ollama, paying a PCIe round-trip per
+# token, which can be slower than running the whole model on CPU alone.
+MODEL_NUM_GPU = os.getenv("MODEL_NUM_GPU")
+
+_model_kwargs = {
+    "model": os.getenv("MODEL_NAME", "cybersecqwen"),
+    "num_keep": 0,
+    "sync_client_kwargs": {"timeout": MODEL_REQUEST_TIMEOUT_SECONDS},
+}
+if MODEL_NUM_GPU is not None:
+    _model_kwargs["num_gpu"] = int(MODEL_NUM_GPU)
+
+model = ChatOllama(**_model_kwargs)
+```
 
 ---
 
@@ -315,20 +439,423 @@ inference for A/B testing against GPU-assisted inference.
 
 ### 5.1 The shared steps (apply to every attack type)
 
-| Step | Function | What it does |
-|---|---|---|
-| 1. Resolve | [`resolve_attack_files_node`](analysis_system/attack_status_workflow.py:327) | Exact-id corpus lookup (`get_attack_entry`) for this attack type — pulls `status_file`, `status_tag`(s), `value_schema`, `verification_category`, `raw_evidence_files`, `writer_script`, `data_source_reliable` from `corpus_documents/attack_<type>.json` |
-| 2. Reliability gate | [`route_after_resolve`](analysis_system/attack_status_workflow.py:413) | If `data_source_reliable` is `false` (only `secure_vault_ransomware`), skip straight to `cannot_determine` — reading a known-wrong source would just produce a confidently-wrong answer |
-| 3. Read live status | [`read_live_status_node`](analysis_system/attack_status_workflow.py:356) | Reads the live tag(s)/file according to `value_schema.type` (see §5.2) via [`_read_xml_tags`](analysis_system/attack_status_workflow.py:226) / [`_read_text_file`](analysis_system/attack_status_workflow.py:254), and computes `triggered_tags` via [`_is_detected`](analysis_system/attack_status_workflow.py:269) |
-| 4. Route | [`route_from_status_check`](analysis_system/attack_status_workflow.py:421) | Missing file → `not_configured`. Any tag triggered → `detected`. Otherwise branches on `verification_category` (§5.3) |
-| 5a. Verify (evidence file) | [`verify_against_raw_evidence_node`](analysis_system/attack_status_workflow.py:460) | For `readable_report`/`diffable_snapshot_files` types: hands an LLM the live `raw_evidence_files` content (plus a labeled corpus reference example, if one exists) and asks whether it contradicts the "not detected" tag |
-| 5b. Verify (raw logs) | [`verify_against_raw_logs_node`](analysis_system/attack_status_workflow.py:614) | For `check_raw_logs` types (`user_breach`, `gateway_unauthorized_breakin`): a **deterministic** regex/phrase match from [`RAW_LOG_CHECKERS`](analysis_system/attack_status_workflow.py:174) against the real rotation-aware log files in [`RAW_LOG_FILE_PATTERNS`](analysis_system/attack_status_workflow.py:104) — no LLM judgment call |
-| 6. Explain | [`attack_info_node`](analysis_system/attack_status_workflow.py:701) | Only for `detected`/`discrepancy`: reads corroborating evidence fresh, runs 2 web searches, asks an LLM for a plain-language explanation + 3-5 recommended actions |
-| 7. Render | [`render_markdown_section_node`](analysis_system/attack_status_workflow.py:775) | Builds the markdown section: status, [provenance chain](analysis_system/attack_status_workflow.py:756) (`writer_script` rendered as numbered hops), triggered tag(s), evidence, explanation |
+All state is a plain dict matching this `TypedDict`, from
+`analysis_system/attack_status_workflow.py`:
+
+```python
+class AttackState(TypedDict):
+    attack_type: str
+    hierarchy: str
+    vault_root: str
+
+    status_file: str
+    status_tag: str
+    meaning: str
+    writer_script: str
+    ui_feature_name: NotRequired[str | None]
+    confidence: str
+    verification_category: str
+    value_schema: NotRequired[dict]
+    raw_evidence_files: NotRequired[list[str]]
+    caveat: NotRequired[str]
+    data_source_reliable: NotRequired[bool]
+    status_tags: NotRequired[list[str]]  # overrides status_tag when set
+
+    live_value: NotRequired[str | None]
+    tag_values: NotRequired[dict[str, str | None]]
+    triggered_tags: NotRequired[list[str]]
+    status_file_existed: NotRequired[bool]
+    verification_outcome: NotRequired[str | None]   # confirmed_clean | contradiction
+    verification_reasoning: NotRequired[str]
+    final_status: NotRequired[str]                   # detected | not_detected | not_detected_unverifiable | discrepancy | not_configured | cannot_determine
+    explainer_text: NotRequired[str]
+    corroborating_evidence_text: NotRequired[str]
+    markdown_section: NotRequired[str]
+```
+
+**1. Resolve** — exact-id corpus lookup for this attack type:
+
+```python
+def resolve_attack_files_node(state: AttackState) -> AttackState:
+    entry = get_attack_entry(state["attack_type"])
+    metadata = entry["metadata"]
+
+    updated = dict(state)
+    updated.update({
+        "status_file": metadata["status_file"],
+        "status_tag": metadata["status_tag"],
+        "meaning": entry["explanation"],
+        "writer_script": metadata.get("writer_script", "unknown"),
+        "ui_feature_name": metadata.get("ui_feature_name"),
+        "confidence": metadata.get("confidence", "unknown"),
+        "verification_category": metadata["verification_category"],
+        "value_schema": metadata.get("value_schema", {"type": "binary_flag"}),
+    })
+    if "raw_evidence_files" in metadata:
+        updated["raw_evidence_files"] = metadata["raw_evidence_files"]
+    if "caveat" in metadata:
+        updated["caveat"] = metadata["caveat"]
+    if "status_tags" in metadata:
+        updated["status_tags"] = metadata["status_tags"]
+    updated["data_source_reliable"] = metadata.get("data_source_reliable", True)
+    return updated
+```
+
+**2. Reliability gate** — a known-unreliable data source (only
+`secure_vault_ransomware`) is caught before it's ever read:
+
+```python
+def route_after_resolve(state: AttackState) -> str:
+    return "cannot_determine" if not state.get("data_source_reliable", True) else "read_status"
+```
+
+**3. Read live status** — reads the live tag(s)/file according to
+`value_schema["type"]` (§5.2):
+
+```python
+def read_live_status_node(state: AttackState) -> AttackState:
+    file_path = _hierarchy_path(state["vault_root"], state["hierarchy"]) / state["status_file"]
+    value_schema = state.get("value_schema") or {"type": "binary_flag"}
+
+    if value_schema.get("type") == "file_contains_pattern":
+        # e.g. config_drift's secOpsOutput_94, rootkit_malware's secOpsOutput_91 --
+        # the whole file's text IS the evidence, not one XML tag.
+        if not file_path.exists():
+            return {**state, "live_value": None, "status_file_existed": False, "triggered_tags": []}
+        content = _read_text_file(file_path, max_chars=8000)[0] or ""
+        triggered = [state["status_tag"]] if _is_detected(content, value_schema) else []
+        return {**state, "live_value": content, "status_file_existed": True, "triggered_tags": triggered}
+
+    if value_schema.get("type") == "file_non_empty":
+        # e.g. banned_ip_bruteforce's banned_ip.xml -- presence, not a tag value.
+        if not file_path.exists():
+            return {**state, "live_value": None, "status_file_existed": False, "triggered_tags": []}
+        content = _read_text_file(file_path)[0] or ""
+        live_value = "non_empty" if content.strip() else "empty"
+        triggered = [state["status_tag"]] if _is_detected(live_value, value_schema) else []
+        return {**state, "live_value": live_value, "status_file_existed": True, "triggered_tags": triggered}
+
+    # status_tags (plural) overrides status_tag when an attack type is backed
+    # by more than one related flag in the same file -- detection triggers
+    # on ANY of them.
+    status_tags = state.get("status_tags") or [state["status_tag"]]
+    tag_values, file_existed = _read_xml_tags(file_path, status_tags)
+    if not file_existed:
+        return {**state, "live_value": None, "status_file_existed": False, "triggered_tags": []}
+
+    triggered_tags = [tag for tag, value in tag_values.items() if _is_detected(value, value_schema)]
+    live_value = (
+        tag_values.get(status_tags[0]) if len(status_tags) == 1
+        else ", ".join(f"{tag}={value}" for tag, value in tag_values.items())
+    )
+    return {
+        **state,
+        "live_value": live_value,
+        "tag_values": tag_values,
+        "triggered_tags": triggered_tags,
+        "status_file_existed": True,
+    }
+```
+
+**4. Route** — a missing status file takes priority over everything else
+(usually means the file was never configured to sync from the client to
+the RV server, not "clean"); detected short-circuits; not-detected splits
+further on `verification_category`:
+
+```python
+def route_from_status_check(state: AttackState) -> str:
+    if not state.get("status_file_existed", True):
+        return "not_configured"
+    if state.get("triggered_tags"):
+        return "detected"
+    if state["verification_category"] in ("readable_report", "diffable_snapshot_files"):
+        return "verify"
+    if state["verification_category"] == "check_raw_logs" and state["attack_type"] in RAW_LOG_CHECKERS:
+        return "verify_raw_logs"
+    return "unverifiable"
+```
+
+**5a. Verify (evidence file)** — for `readable_report`/
+`diffable_snapshot_files` types, an LLM checks the live `raw_evidence_files`
+content (plus a labeled corpus reference example, if one exists) against
+the "not detected" claim (system prompt abbreviated below — see source for
+the full text, which also covers shared multi-tag files and
+restated-conclusion evidence):
+
+```python
+def verify_against_raw_evidence_node(state: AttackState) -> AttackState:
+    hierarchy_root = _hierarchy_path(state["vault_root"], state["hierarchy"])
+    evidence_texts = []
+    missing_files = []
+    for rel_path in state.get("raw_evidence_files", []):
+        content, existed = _read_text_file(hierarchy_root / rel_path)
+        if not existed:
+            missing_files.append(rel_path)
+            continue
+        if not content:
+            continue
+        # ... builds a labeled corpus reference block (if one exists for this
+        # file) plus the live content, then hands both to the LLM ...
+        evidence_texts.append(f"--- {rel_path} ---\n=== ACTUAL LIVE CONTENT ===\n{content}\n=== END ===")
+
+    if not evidence_texts:
+        # Expected evidence file(s) missing -- don't guess, say why.
+        reasoning = (
+            f"Raw evidence file(s) not found: {', '.join(missing_files)}. Not configured "
+            f"to sync from the client system, so this could not be independently verified."
+            if missing_files else
+            "Raw evidence file(s) exist but were unreadable; falling back to the tag's status."
+        )
+        return {**state, "verification_outcome": "confirmed_clean", "verification_reasoning": reasoning}
+
+    combined_evidence = "\n\n".join(evidence_texts)
+    # system prompt (abbreviated): "You are a cybersecurity analyst double-
+    # checking a 'not detected' status ... Only flag a contradiction if the
+    # evidence clearly shows the attack occurred ... Only flag a
+    # contradiction if evidence SPECIFIC TO THIS ATTACK TYPE disagrees ...
+    # a restated pass/fail verdict is corroboration, not independent
+    # evidence, give it little weight ..."
+    template = ChatPromptTemplate.from_messages([
+        ("system", "..."),
+        ("user", "Attack type: {attack_type}\nWhat this status normally means: {meaning}\n\n"
+                  "Raw evidence:\n{evidence}\n\nDoes this evidence confirm the system is clean, "
+                  "or contradict the 'not detected' status?")
+    ])
+    try:
+        structured_model = model.with_structured_output(EvidenceVerificationResult)
+        result = (template | structured_model).invoke({
+            "attack_type": state["attack_type"], "meaning": state["meaning"], "evidence": combined_evidence,
+        })
+        return {**state, "verification_outcome": result.outcome, "verification_reasoning": result.reasoning}
+    except Exception as e:
+        return {**state, "verification_outcome": "confirmed_clean",
+                "verification_reasoning": f"Verification pass failed ({e}); falling back to the tag's own status."}
+```
+
+`EvidenceVerificationResult` (the structured-output schema for step 5a):
+
+```python
+class EvidenceVerificationResult(BaseModel):
+    outcome: Literal["confirmed_clean", "contradiction"] = Field(
+        description="confirmed_clean if the raw evidence supports the 'not detected' "
+                    "status; contradiction if the evidence suggests the attack may "
+                    "actually have occurred despite the tag saying otherwise."
+    )
+    reasoning: str = Field(description="1-3 sentence justification citing what was found in the evidence.")
+```
+
+**5b. Verify (raw logs)** — for `check_raw_logs` types (`user_breach`,
+`gateway_unauthorized_breakin`), a **deterministic** regex/phrase match —
+no LLM judgment call:
+
+```python
+RAW_LOG_FILE_PATTERNS: dict[str, list[str]] = {
+    "user_breach": ["var/log/secure*", "rationalVault/log/rationalclient.log*"],
+    "gateway_unauthorized_breakin": ["home/athinio/data/1cloudFiler/log/gateway.log*"],
+}
+
+def _check_user_breach_raw_logs(log_text: str) -> tuple[bool, str]:
+    fails = SSHD_FAIL_RE.findall(log_text)
+    accepts = SSHD_ACCEPT_RE.findall(log_text)
+    fail_ips = {ip for _, ip in fails}
+    for user, ip in accepts:
+        if ip in fail_ips:
+            return True, (
+                f"Found failed password attempts from {ip} followed by a successful "
+                f"password login for '{user}' from that same address."
+            )
+    return False, "No failed-then-accepted-password sequence from the same source address found."
+
+def _check_gateway_breakin_raw_logs(log_text: str) -> tuple[bool, str]:
+    matches = [line for line in log_text.splitlines() if "Break-in Attempt" in line]
+    if matches:
+        return True, f"Found {len(matches)} line(s) containing 'Break-in Attempt', e.g.: {matches[0].strip()}"
+    return False, "No 'Break-in Attempt' lines found in the available gateway.log content."
+
+RAW_LOG_CHECKERS = {
+    "user_breach": _check_user_breach_raw_logs,
+    "gateway_unauthorized_breakin": _check_gateway_breakin_raw_logs,
+}
+
+def verify_against_raw_logs_node(state: AttackState) -> AttackState:
+    hierarchy_root = _hierarchy_path(state["vault_root"], state["hierarchy"])
+    checker = RAW_LOG_CHECKERS[state["attack_type"]]
+
+    combined_text_parts, missing_patterns = [], []
+    for pattern in RAW_LOG_FILE_PATTERNS.get(state["attack_type"], []):
+        matches = sorted(hierarchy_root.glob(pattern))   # glob, not exact name -- these logs rotate
+        if not matches:
+            missing_patterns.append(pattern)
+            continue
+        for match_path in matches:
+            content, existed = _read_text_file(match_path, max_chars=20000)
+            if existed and content:
+                combined_text_parts.append(content)
+
+    if not combined_text_parts:
+        reasoning = (
+            f"Raw log file(s) not found (patterns tried: {', '.join(missing_patterns)})."
+            if missing_patterns else "Raw log files exist but were unreadable."
+        )
+        return {**state, "verification_outcome": "confirmed_clean", "verification_reasoning": reasoning}
+
+    found, reasoning = checker("\n".join(combined_text_parts))
+    return {**state, "verification_outcome": "contradiction" if found else "confirmed_clean",
+            "verification_reasoning": reasoning}
+```
+
+Both 5a and 5b converge on the same routing:
+
+```python
+def route_after_verification(state: AttackState) -> str:
+    return "discrepancy" if state.get("verification_outcome") == "contradiction" else "confirmed_clean"
+```
+
+**6. Explain** — only for `detected`/`discrepancy`: reads corroborating
+evidence fresh, runs 2 web searches, asks the LLM for a plain-language
+explanation + recommended actions:
+
+```python
+def attack_info_node(state: AttackState) -> AttackState:
+    attack_type = state["attack_type"]
+    corroborating_evidence_text = _read_corroborating_evidence(state)
+
+    queries = [
+        f"what is a {attack_type.replace('_', ' ')} cyberattack",
+        f"how to respond to and remediate a {attack_type.replace('_', ' ')} attack",
+    ]
+    snippets = []
+    for query in queries:
+        try:
+            with DDGS() as ddgs:
+                for r in list(ddgs.text(query, max_results=3)):
+                    snippets.append(f"- {r.get('title', '')}: {r.get('body', '')}")
+        except Exception as e:
+            snippets.append(f"- (search failed for '{query}': {e})")
+
+    template = ChatPromptTemplate.from_messages([
+        ("system", "You are a cybersecurity analyst writing a short, plain-language "
+                   "explanation for a customer dashboard. Given search snippets about an "
+                   "attack type, write: (1) a 2-3 sentence explanation of what this "
+                   "attack is, and (2) 3-5 concrete recommended actions, as a bullet list."),
+        ("user", "Attack type: {attack_type}\n\nSearch results:\n{snippets}")
+    ])
+    try:
+        response = (template | model).invoke({
+            "attack_type": attack_type,
+            "snippets": "\n".join(snippets) if snippets else "No search results available.",
+        })
+        explainer_text = getattr(response, "content", str(response))
+    except Exception as e:
+        explainer_text = f"(Explanation generation failed: {e})"
+
+    return {**state, "explainer_text": str(explainer_text), "corroborating_evidence_text": corroborating_evidence_text}
+```
+
+**7. Render** — builds the markdown section: status, provenance chain,
+triggered tag(s), evidence, explanation:
+
+```python
+def _format_provenance_chain(writer_script: str, status_file: str, tags_display: str) -> str:
+    """writer_script is an arrow-delimited chain (" -> ") wherever a real
+    multi-hop provenance was confirmed from source, e.g. "oneCloudFilerx ->
+    config.xml's RansomDetected -> gatewayMonitor.sh -> alertlog.xml's
+    AMS_Ransom_current_status" -- rendered as numbered hops."""
+    hops = [h.strip() for h in writer_script.split(" -> ") if h.strip()] or [writer_script]
+    lines = [f"{i}. {hop}" for i, hop in enumerate(hops, start=1)]
+    lines.append(f"{len(hops) + 1}. **`{status_file}` -> `{tags_display}`** *(this workflow reads here)*")
+    return "\n".join(lines)
+
+def render_markdown_section_node(state: AttackState) -> AttackState:
+    attack_label = state["attack_type"].replace("_", " ").title()
+    final_status = state["final_status"]
+    # not_detected_unverifiable displays as plain "NOT DETECTED" -- the
+    # unverifiable/verified distinction is conveyed by whether evidence
+    # appears below, not a separate status word.
+    display_status = "not_detected" if final_status == "not_detected_unverifiable" else final_status
+
+    lines = [f"## {attack_label}", "", f"<!-- {STATUS_MARKER}: {final_status} -->"]
+    lines.append(f"**Status:** {display_status.replace('_', ' ').upper()}")
+    status_tags = state.get("status_tags") or [state["status_tag"]]
+    tags_display = ", ".join(status_tags)
+    lines.append(f"\n**Source chain:**\n{_format_provenance_chain(state['writer_script'], state['status_file'], tags_display)}")
+
+    if final_status == "detected":
+        triggered = state.get("triggered_tags") or status_tags
+        if len(status_tags) > 1:
+            lines.append(f"\n**Triggered tag(s):** `{', '.join(triggered)}` (out of `{', '.join(status_tags)}` checked)")
+        lines.append(f"\n{state['meaning']}")
+        if state.get("corroborating_evidence_text"):
+            lines.append(f"\n### Corroborating raw evidence\n\n```\n{state['corroborating_evidence_text']}\n```")
+        lines.append(f"\n### What this attack is / recommended actions\n\n{state.get('explainer_text', '')}")
+
+    elif final_status == "discrepancy":
+        lines.append(f"\n⚠ The status tag says 'not detected', but independent review of the raw "
+                      f"evidence disagreed: {state.get('verification_reasoning', '')}")
+        feature_ref = state.get("ui_feature_name") or f"the feature that manages `{state['writer_script']}`"
+        lines.append(f"\n**Recommended:** re-run **{feature_ref}** from the dashboard for an "
+                      f"authoritative fresh determination.")
+        if state.get("corroborating_evidence_text"):
+            lines.append(f"\n### Corroborating raw evidence\n\n```\n{state['corroborating_evidence_text']}\n```")
+        lines.append(f"\n### What this attack is / recommended actions\n\n{state.get('explainer_text', '')}")
+
+    elif final_status == "not_detected":
+        lines.append(f"\n✅ Not detected. Verified against raw evidence: {state.get('verification_reasoning', '')}")
+        if state.get("corroborating_evidence_text"):
+            lines.append(f"\n### Raw evidence checked\n\n```\n{state['corroborating_evidence_text']}\n```")
+
+    elif final_status == "not_detected_unverifiable":
+        live_value_display = state.get("live_value")
+        value_line = (f"currently reads:\n\n```\n{live_value_display}\n```"
+                       if live_value_display and "\n" in str(live_value_display)
+                       else f"currently reads `{live_value_display}`.")
+        lines.append(f"\n✅ Not detected -- `{state['status_file']}` -> `{tags_display}` {value_line}\n\n"
+                      f"No independent evidence exists for this attack type, so this reading could not be "
+                      f"cross-checked against anything else.")
+        lines.append(f"\n**What determines this status:**\n\n{state.get('meaning', '')}")
+
+    elif final_status == "not_configured":
+        vault_display = f"rationalVault/data/{state['hierarchy']}/{state['status_file']}"
+        lines.append(f"\n❓ **File not configured for this system.** `{state['status_file']}` was not "
+                      f"found at `{vault_display}`. This is not the same as a clean result.")
+
+    else:  # cannot_determine
+        lines.append("\n⛔ **Cannot determine.** The data source for this attack type is known "
+                      "to be unreliable independent of its current value -- do not treat this as "
+                      "either detected or clean.")
+
+    return {**state, "markdown_section": "\n".join(lines) + "\n"}
+```
 
 ### 5.2 `value_schema` types — how a raw tag value becomes detected/clean
 
-Interpreted by [`_is_detected`](analysis_system/attack_status_workflow.py:269):
+```python
+def _is_detected(live_value: str | None, value_schema: dict | None) -> bool:
+    if live_value is None:
+        return False
+    schema = value_schema or {"type": "binary_flag"}
+    schema_type = schema.get("type", "binary_flag")
+
+    if schema_type == "binary_flag":
+        return live_value == "1"
+    if schema_type in ("string_pattern", "file_contains_pattern"):
+        pattern = schema.get("detected_regex", "")
+        return bool(pattern) and re.search(pattern, live_value) is not None
+    if schema_type == "raw_value_needs_baseline_diff":
+        # The tag itself is a raw timestamp/permission value, never a flag --
+        # always False here so the graph proceeds to verification, where the
+        # actual baseline diff is what determines drift.
+        return False
+    if schema_type == "count_greater_than_zero":
+        try:
+            return int(live_value) > 0
+        except (TypeError, ValueError):
+            return False
+    if schema_type == "file_non_empty":
+        return live_value == "non_empty"
+
+    raise ValueError(f"Unknown value_schema type: {schema_type!r}")
+```
 
 | `type` | Meaning | Used by |
 |---|---|---|
@@ -398,51 +925,121 @@ the authoritative source these table rows were summarized from.
 ### 5.5 The attack corpus — exact lookup vs. semantic query
 
 `corpus_documents/*.json` is the human-editable source of truth (§1.4);
-[`corpus_server.py`](analysis_system/corpus_server.py) is the running
-service in front of it — a `chromadb` `PersistentClient` collection
-(`corpus_db/`) that both `ingest_corpus.py` writes into and
-`attack_status_workflow.py` reads from, over MCP (via
-[`lib/corpus_client.py`](analysis_system/lib/corpus_client.py)).
+`corpus_server.py` is the running service in front of it — a `chromadb`
+`PersistentClient` collection (`corpus_db/`) that both `ingest_corpus.py`
+writes into and `attack_status_workflow.py` reads from, over MCP.
 
-Two different lookup modes are exposed, and the attack-status workflow
-only ever uses one of them:
+**Exact lookup — the actual hot path.** `resolve_attack_files_node`
+(§5.1 step 1) calls `get_attack_entry`, which calls `get_corpus_entry`
+with the exact id `attack_<type>` — a plain Chroma `.get(ids=[id])`, no
+embedding or similarity search involved. `analysis_system/lib/attack_status_data.py`:
 
-- **Exact lookup — the actual hot path.** [`resolve_attack_files_node`](analysis_system/attack_status_workflow.py:327)
-  (§5.1 step 1) calls [`get_attack_entry`](analysis_system/lib/attack_status_data.py:55),
-  which calls [`get_corpus_entry`](analysis_system/corpus_server.py:103)
-  with the exact id `attack_<type>` (e.g. `attack_ransomware`) — a plain
-  Chroma `.get(ids=[id])`, no embedding or similarity search involved.
-  `attack_type` is always a known, already-resolved key at this point (from
-  [`get_enabled_attack_types`](analysis_system/lib/attack_status_data.py:33)),
-  never a free-text query, so there's nothing to search semantically for.
-- **Semantic query — available, but not on this workflow's path.**
-  [`query_corpus`](analysis_system/corpus_server.py:118) embeds free text
-  with `nomic-embed-text` and returns the `n_results` nearest corpus
-  entries by embedding distance. Nothing in `attack_status_workflow.py` or
-  `lib/log_analysis_workflow.py` currently calls it — it exists for
-  future/other consumers, e.g. a not-yet-built contribution workflow
-  checking whether a new proposed entry already resembles an existing one
-  before adding it, or ad-hoc exploration (`python -c "from
-  lib.corpus_client import query_corpus; print(query_corpus('unexpected
-  root account'))"`).
+```python
+def get_known_attack_types() -> list[str]:
+    """Every attack_type currently in the corpus."""
+    entries = list_corpus_entries()
+    return sorted(
+        e["metadata"]["attack_type"]
+        for e in entries
+        if "attack_type" in e.get("metadata", {})
+    )
 
-**What `nomic-embed-text` is for, concretely**: it's the embedding model
-[`corpus_server.py`](analysis_system/corpus_server.py:37) uses
-(`OllamaEmbeddings(model=EMBED_MODEL)`, `EMBED_MODEL` defaulting to
-`nomic-embed-text`, override via `CORPUS_EMBED_MODEL`) to turn text into
-vectors for the corpus store — used in exactly two places:
+def get_enabled_attack_types() -> list[str]:
+    """Which of the known attack types this run should actually check --
+    see ENABLED_ATTACK_TYPES in .env.example. Unset/empty means all known
+    types; unknown names are dropped with a warning, not a crash."""
+    known = get_known_attack_types()
+    raw = os.getenv("ENABLED_ATTACK_TYPES", "").strip()
+    if not raw:
+        return known
+    requested = [name.strip() for name in raw.split(",") if name.strip()]
+    enabled = [name for name in requested if name in known]
+    unknown = set(requested) - set(enabled)
+    if unknown:
+        warnings.warn(f"ENABLED_ATTACK_TYPES named unknown attack type(s), skipped: {sorted(unknown)}.")
+    return enabled
 
-1. [`add_corpus_entry`](analysis_system/corpus_server.py:74) (called by
-   [`ingest_corpus.py`](analysis_system/ingest_corpus.py) for every
+def get_attack_entry(attack_type: str) -> dict:
+    """Exact id lookup -- attack_type is always a known key here, resolved
+    from get_enabled_attack_types(), never a free-text query."""
+    entry = get_corpus_entry(f"attack_{attack_type}")
+    if not entry.get("found"):
+        raise KeyError(f"No corpus entry for attack type: {attack_type!r}")
+    return entry
+```
+
+**Semantic query — available, but not on this workflow's path.**
+`query_corpus` embeds free text with `nomic-embed-text` and returns the
+nearest corpus entries by embedding distance. Nothing in
+`attack_status_workflow.py` or `lib/log_analysis_workflow.py` currently
+calls it — it exists for future/other consumers (e.g. a not-yet-built
+contribution workflow checking a new proposed entry against existing
+ones). From `analysis_system/corpus_server.py`:
+
+```python
+EMBED_MODEL = os.getenv("CORPUS_EMBED_MODEL", "nomic-embed-text")
+_embeddings = OllamaEmbeddings(model=EMBED_MODEL)
+
+@mcp.tool()
+def get_corpus_entry(id: str) -> dict:
+    """Exact lookup by id -- no embedding/similarity involved."""
+    result = _collection.get(ids=[id])
+    if not result["ids"]:
+        return {"found": False}
+    return {
+        "found": True,
+        "id": result["ids"][0],
+        "explanation": result["documents"][0],
+        "metadata": _unflatten_metadata(result["metadatas"][0]),
+    }
+
+@mcp.tool()
+def query_corpus(text: str, n_results: int = 3) -> list[dict]:
+    """Semantic search -- for free-text questions and, later, for a
+    contribution workflow to check a new submission before committing it."""
+    embedding = _embeddings.embed_query(text)
+    results = _collection.query(query_embeddings=[embedding], n_results=n_results)
+    if not results["ids"] or not results["ids"][0]:
+        return []
+    return [
+        {
+            "id": results["ids"][0][i],
+            "explanation": results["documents"][0][i],
+            "metadata": _unflatten_metadata(results["metadatas"][0][i]),
+            "distance": results["distances"][0][i],
+        }
+        for i in range(len(results["ids"][0]))
+    ]
+```
+
+**What `nomic-embed-text` is for, concretely** — it's `EMBED_MODEL` above,
+used in exactly two places:
+
+1. `add_corpus_entry` (called by `ingest_corpus.py` for every
    `corpus_documents/*.json` file) — embeds that entry's `explanation`
-   field once, at ingest time, and stores the resulting vector alongside
-   the id/metadata. Only `explanation` is embedded, never
-   `raw_content_examples` or other metadata — embedding raw XML/log text
-   doesn't help similarity search the way a natural-language description
-   does.
-2. [`query_corpus`](analysis_system/corpus_server.py:118) — embeds the
-   incoming free-text query at request time, then Chroma compares that
-   vector against every stored entry's embedding to rank nearest matches.
+   field once, at ingest time. Only `explanation` is embedded, never
+   `raw_content_examples` or other metadata:
+
+   ```python
+   @mcp.tool()
+   def add_corpus_entry(id: str, explanation: str, metadata: dict) -> str:
+       embedding = _embeddings.embed_query(explanation)
+       # Chroma's upsert() MERGES metadata for an existing id instead of
+       # replacing it -- delete first so a field renamed/removed in
+       # corpus_documents/*.json actually disappears from the store.
+       _collection.delete(ids=[id])
+       _collection.add(
+           ids=[id],
+           embeddings=[embedding],
+           documents=[explanation],
+           metadatas=[_flatten_metadata(metadata)],
+       )
+       return f"{id} added/updated"
+   ```
+
+2. `query_corpus` (above) — embeds the incoming free-text query at
+   request time, then Chroma compares that vector against every stored
+   entry's embedding to rank nearest matches.
 
 It's a separate, smaller model from `cybersecqwen` (§4.2) — one is an
 embedding model for the corpus store, the other is the chat model that
@@ -454,22 +1051,314 @@ nomic-embed-text` even though it never appears in a prompt or a report.
 
 ## 6. Log analysis — step by step
 
-Module: [`lib/log_analysis_workflow.py`](analysis_system/lib/log_analysis_workflow.py).
-Unlike the attack-status checks (23 independent LangGraph invocations),
-this is one classification pass followed by a plain Python loop over
-however many incident types came out of it — no LangGraph here, but the
-same invoke-fresh/append/discard discipline.
+Module: `analysis_system/lib/log_analysis_workflow.py`. Unlike the
+attack-status checks (23 independent LangGraph invocations), this is one
+classification pass followed by a plain Python loop over however many
+incident types came out of it — no LangGraph here, but the same
+invoke-fresh/append/discard discipline.
 
-| Step | Function | What it does |
-|---|---|---|
-| 1. Read local logs | [`_consolidate_local_log_files`](analysis_system/lib/log_analysis_workflow.py:707) | Reads `var/log/messages`, `var/log/secure`, `var/log/audit.log` (configurable via `LOG_FILE_PATHS`) directly from the hierarchy directory the attack-status pull already populated — no separate vault fetch. Each file capped to its last `LOG_TAIL_LINES` lines |
-| 2a. Initial analysis | [`InitialAnalysisNode`](analysis_system/lib/log_analysis_workflow.py:283) | First of two LLM calls that see raw log text — produces a title + 100-200 word initial analysis |
-| 2b. Classify | [`InitialSearchFromLogsToDatasetNode`](analysis_system/lib/log_analysis_workflow.py:338) | Second and last call to see raw log text — picks a primary `incident_type` and any `secondary_incident_types` from the fixed [`ALLOWED_INCIDENT_TYPES`](analysis_system/lib/log_analysis_workflow.py:95) (12 types, scoped to what's detectable from these 3 logs). A rule-based hint embedded in the log text (from the deterministic attack-status checks) is treated as near-authoritative; without one, runs self-consistency voting `CLASSIFICATION_VOTE_COUNT` times (default 1, off) |
-| 3. Discard raw text | [`_classify_once`](analysis_system/lib/log_analysis_workflow.py:511) | Wraps steps 2a/2b; nothing past this point ever sees the raw logs again — only `title`/`content`/incident type(s) |
-| 4. Search (primary only) | [`_form_search_queries`](analysis_system/lib/log_analysis_workflow.py:531) + [`_run_ddg_search`](analysis_system/lib/log_analysis_workflow.py:565) | 5 queries — 2 plainly describing the incident/technique, 3 targeted at named threat-intel sources (MITRE ATT&CK, CISA, NVD/CVE, via `site:` operators) — then run through DuckDuckGo. **Secondary incidents skip this step entirely** |
-| 5. Explain | [`_explain_incident`](analysis_system/lib/log_analysis_workflow.py:584) | One incident at a time (primary and secondary get identical treatment here): calibrated `threat_level` (low/medium/high/critical), a 300-500 word narrative grounded in title/content/search results, recommended actions |
-| 6. Render | [`_render_incident_section`](analysis_system/lib/log_analysis_workflow.py:682) + [`_render_search_results_section`](analysis_system/lib/log_analysis_workflow.py:655) | One markdown section per incident; the search-results block (grouped by query, real DDG results) only appears for the primary incident, since that's the only one with search results to show |
-| 7. Loop driver | [`run_log_analysis_loop`](analysis_system/lib/log_analysis_workflow.py:734) | Orchestrates steps 1-6, appends each section to the shared report, short-circuits to a plain clean-run note if no log files were found or nothing applicable was classified |
+**1. Read local logs** — no separate vault fetch, each file capped to its
+last `LOG_TAIL_LINES` lines:
+
+```python
+def _consolidate_local_log_files(hierarchy_dir: Path) -> str:
+    tail_lines = _load_log_tail_lines()
+    sections = []
+    for configured_path in _load_log_file_paths():
+        path = hierarchy_dir / configured_path.strip("/")
+        if not path.is_file():
+            print(f"  - Not found locally: {path}")
+            continue
+        content = _read_as_text_or_placeholder(path, tail_lines)
+        sections.append(f"===== {configured_path} =====\n{content}")
+        print(f"  + Found: {path}")
+
+    if not sections:
+        return CLEAN_RUN_MARKER + "\n"
+    return "\n\n".join(sections) + "\n"
+```
+
+**2a/2b. Initial analysis + classify** — the only two LLM calls that see
+raw log text. The fixed taxonomy this classifies into:
+
+```python
+ALLOWED_INCIDENT_TYPES = {
+    "user_breach", "privilege_escalation", "ssh_key_injection",
+    "suspicious_command_execution", "assets_permission_tamper",
+    "file_integrity_tamper", "unknown_binary_execution", "log_tampering",
+    "banned_ip", "disk_full", "memory_leak", "network_anomaly",
+}
+INCIDENT_TYPES = sorted(ALLOWED_INCIDENT_TYPES)
+NONE_APPLICABLE_INCIDENT_TYPE = "none_applicable"
+```
+
+```python
+def InitialAnalysisNode(state: MessageState) -> MessageState:
+    """First of two places raw log text reaches the LLM -- a title +
+    100-200 word initial analysis."""
+    structured_model = model.with_structured_output(InitialAnalysisTemplate)
+    template = ChatPromptTemplate.from_messages([
+        ("system", "You are a cybersecurity analyst. Analyze the logs and provide an appropriate "
+                   "title and a 100-200 word initial analysis. Ignore file-not-found style noise and "
+                   "focus on true security indicators. Be literal and precise about what the logs "
+                   "actually say -- do not paraphrase or substitute the name of a system/service with "
+                   "a different one just because something similar-sounding appears nearby."),
+        ("user", "{logs}")
+    ])
+    result = (template | structured_model).invoke({"logs": state["logs"]})
+    return {**_carry_context(state), "logs": state["logs"], "result": result.model_dump()}
+```
+
+```python
+def InitialSearchFromLogsToDatasetNode(state: MessageState) -> MessageState:
+    """Second and last place raw log text reaches the LLM -- picks
+    incident_type + secondary_incident_types. A rule-based hint embedded
+    in the log text (from the deterministic attack-status checks) is
+    treated as near-authoritative; self-consistency voting (majority vote
+    over CLASSIFICATION_VOTE_COUNT passes, default 1/off) only runs for
+    cold classification, with no hint present."""
+    incident_type_model = model.with_structured_output(InitialSearchFromLogsToDatasetTemplate)
+    prior_result = dict(state.get("result", {}))
+    title, content = prior_result.get("title", "..."), prior_result.get("content", "")
+
+    suggested_match = re.search(r"Suggested incident_type \(rule-based, from detection source\):\s*(\S+)", state["logs"])
+    suggested_hint = suggested_match.group(1) if suggested_match else None
+
+    # ... builds hint_instruction/secondary_hint_instruction text from any
+    # rule-based hints found in the logs, then the classification prompt:
+    incident_type_template = ChatPromptTemplate.from_messages([
+        ("system", f"""You are a cybersecurity analyst. Using the existing initial analysis and logs,
+return incident_type (PRIMARY) and secondary_incident_types (list). Must be one of:
+{{allowed_types}}. Base your choice strictly on the LITERAL actions, commands, filenames, and alert
+messages that actually appear in the logs -- not on a type's name merely sounding thematically related.
+One pattern worth being precise about: a cluster of "Failed password" entries from one source address,
+followed by an "Accepted password" (not "Accepted publickey") success from that SAME address, is
+user_breach, regardless of other routine activity in the same window."""),
+        ("user", "Logs:\n{logs}\n\nInitial Analysis:\nTitle: {title}\nContent: {content}")
+    ])
+
+    if suggested_hint:
+        incident_type_result = _classify_once_vote()   # single pass, hint trusted
+    else:
+        vote_count = max(1, int(os.getenv("CLASSIFICATION_VOTE_COUNT", "1")))
+        votes = [_classify_once_vote() for _ in range(vote_count)]
+        primary_counts = Counter(v.incident_type for v in votes)
+        winning_type, _ = primary_counts.most_common(1)[0]
+        agreeing_votes = [v for v in votes if v.incident_type == winning_type]
+        # ... majority-vote secondary types among the agreeing votes too ...
+
+    return {**_carry_context(state), "logs": state["logs"], "result": {**prior_result, **incident_type_result.model_dump()}}
+```
+
+**3. Discard raw text** — wraps steps 2a/2b; nothing past this point ever
+sees the raw logs again:
+
+```python
+def _classify_once(logs_content: str, logs_file: Path, output_dir: Path, customer_ids: list[str]) -> dict:
+    state: MessageState = {
+        "logs": logs_content, "result": {},
+        "logs_path": str(logs_file), "output_dir": str(output_dir), "customer_ids": customer_ids,
+    }
+    state = InitialAnalysisNode(state)
+    state = InitialSearchFromLogsToDatasetNode(state)
+    return state["result"]
+```
+
+**4. Search (primary only)** — 5 queries (2 describing the incident, 3
+targeted at named threat-intel sources via `site:` operators), then
+DuckDuckGo. Secondary incidents skip this step entirely:
+
+```python
+def _form_search_queries(title: str, content: str, incident_type: str) -> list[str]:
+    structured_model = model.with_structured_output(QuestionFormerOutputTemplate)
+    template = ChatPromptTemplate.from_messages([
+        ("system", "You are a cybersecurity analyst. Generate 5 search queries. The first two "
+                   "should simply describe the incident/technique itself in plain, general terms. "
+                   "The other three should each be targeted at a specific named threat-intelligence "
+                   "source -- MITRE ATT&CK, CISA advisories, NVD/CVE -- phrased to surface pages from "
+                   "that source specifically (e.g. site:attack.mitre.org, site:cisa.gov, "
+                   "site:nvd.nist.gov) when there's a concrete technique/CVE angle to search for. "
+                   "Do not use internal or proprietary system field/product names in any query."),
+        ("user", "Title: {title}\n\nAnalysis: {content}")
+    ])
+    result = (template | structured_model).invoke({"title": title, "content": content})
+    return [q for q in [result.search_query_1, result.search_query_2, result.search_query_3,
+                         result.search_query_4, result.search_query_5] if q]
+
+def _run_ddg_search(queries: list[str]) -> list[dict]:
+    all_results = []
+    for i, query in enumerate(queries, 1):
+        with DDGS() as ddgs:
+            for r in list(ddgs.text(query, max_results=5)):
+                all_results.append({
+                    "query_number": i, "query": query,
+                    "title": r.get("title", "No title"), "url": r.get("href", ""),
+                    "snippet": r.get("body", "No description available"),
+                })
+    return all_results
+```
+
+In `run_log_analysis_loop`'s per-incident loop, the search call itself is
+gated on `is_primary`:
+
+```python
+if is_primary:
+    queries = _form_search_queries(title, content, incident_type)
+    search_results = _run_ddg_search(queries) if queries else []
+else:
+    search_results = []
+```
+
+**5. Explain** — one incident at a time, primary and secondary get
+identical treatment here (only the search results differ — empty for
+secondary):
+
+```python
+def _explain_incident(title: str, content: str, incident_type: str,
+                       search_results: list[dict]) -> ExplainerOutputTemplate | None:
+    structured_model = model.with_structured_output(ExplainerOutputTemplate)
+    search_context = "\n\n".join([
+        f"Query {sr.get('query_number')}: {sr.get('query')}\nTitle: {sr.get('title', 'N/A')}\n"
+        f"URL: {sr.get('url', 'N/A')}\nSnippet: {sr.get('snippet', 'N/A')}"
+        for sr in search_results if "error" not in sr
+    ]) or "No search results available."
+
+    template = ChatPromptTemplate.from_messages([
+        ("system", """You are a senior cybersecurity analyst. Explain this one incident in a clear
+analyst narrative style, grounded in the title/analysis and search intelligence given. The search
+results are general background intelligence, NOT a report of what was observed on this system --
+never phrase something from a search result as if it was directly observed. Calibrate threat_level:
+LOW = a single low-confidence indicator with no evidence of compromise. MEDIUM = suspicious activity
+with real supporting evidence, not confirmed. HIGH = multiple corroborating findings, or strong
+evidence of actual unauthorized access. CRITICAL = confirmed active compromise, severe impact.
+Write detailed_analysis as plain paragraphs -- no markdown headers."""),
+        ("user", "Title: {title}\nContent: {content}\nIncident type: {incident_type}\n\n"
+                  "Threat Intelligence from Search Results:\n{search_context}\n\n"
+                  "Provide your detailed security analysis for this one incident.")
+    ])
+    try:
+        return (template | structured_model).invoke({
+            "title": title, "content": content, "incident_type": incident_type, "search_context": search_context,
+        })
+    except Exception as e:
+        print(f"  ⚠ Explanation generation failed for '{incident_type}': {e}")
+        return None
+```
+
+**6. Render** — one markdown section per incident; the search-results
+block (grouped by query, real DDG results) only appears for the primary
+incident:
+
+```python
+def _render_search_results_section(search_results: list[dict]) -> str:
+    """Renders the actual DDG results (not ExplainerOutputTemplate's
+    LLM-echoed copy, which is unvalidated model output), grouped by query."""
+    if not search_results:
+        return "\n**Search results:** none returned for this incident's queries.\n"
+    by_query, query_text = {}, {}
+    for r in search_results:
+        qn = r.get("query_number")
+        by_query.setdefault(qn, []).append(r)
+        query_text[qn] = r.get("query", "")
+    lines = ["\n**Search results:**"]
+    for qn in sorted(by_query, key=lambda x: (x is None, x)):
+        lines.append(f"\n_Query: {query_text[qn]}_")
+        for r in by_query[qn]:
+            title = r.get("title") or "No title"
+            url = r.get("url", "")
+            entry = f"[{title}]({url})" if url else title
+            lines.append(f"- {entry} — {r.get('snippet', '')}")
+    return "\n".join(lines) + "\n"
+
+def _render_incident_section(incident_type: str, is_primary: bool,
+                              explainer: ExplainerOutputTemplate | None,
+                              search_results: list[dict]) -> str:
+    label = incident_type.replace("_", " ").title()
+    role = "Primary incident" if is_primary else "Secondary incident"
+    lines = [f"## {label}", "", f"<!-- {STATUS_MARKER}: {incident_type} -->", f"**{role}**"]
+
+    if explainer is None:
+        lines.append("\n⚠ Detailed explanation could not be generated for this incident (see logs).")
+    else:
+        lines.append(f"\n**Threat level:** {explainer.threat_level.upper()}")
+        lines.append(f"\n{_demote_embedded_headers(explainer.detailed_analysis)}")
+        if explainer.recommended_actions:
+            lines.append("\n**Recommended actions:**")
+            for action in explainer.recommended_actions:
+                lines.append(f"- {action}")
+
+    if is_primary:
+        lines.append(_render_search_results_section(search_results))
+    return "\n".join(lines) + "\n"
+```
+
+**7. Loop driver** — orchestrates steps 1-6, appends each section to the
+shared report, short-circuits to a plain clean-run note if no log files
+were found or nothing applicable was classified:
+
+```python
+def run_log_analysis_loop(hierarchy: str, hierarchies_dir: Path, report_path: Path) -> dict:
+    hierarchy_clean = hierarchy.strip("/\\")
+    hierarchy_dir = hierarchies_dir / Path(hierarchy_clean)
+
+    logs_content = _consolidate_local_log_files(hierarchy_dir)
+    logs_file = hierarchy_dir / "logs_aggregated.txt"
+    logs_file.write_text(logs_content, encoding="utf-8")
+
+    with open(report_path, "a", encoding="utf-8") as f:
+        f.write(f"\n# Log Analysis (secure / messages / audit.log)\n\n**Read from:** `{hierarchy_dir}`\n\n")
+
+    if CLEAN_RUN_MARKER in logs_content:
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write("✅ Clean run -- none of the configured log files were present.\n")
+        return {"incident_count": 0, "logs_file": str(logs_file)}
+
+    classification = _classify_once(logs_content, logs_file, hierarchy_dir, hierarchy_clean.split("/"))
+    # Raw log text is never referenced again past this line.
+
+    title = classification.get("title", "Potential Security Incident")
+    content = classification.get("content", "")
+    primary_type = classification.get("incident_type", NONE_APPLICABLE_INCIDENT_TYPE)
+    secondary_types = classification.get("secondary_incident_types", []) or []
+
+    if primary_type == NONE_APPLICABLE_INCIDENT_TYPE and not secondary_types:
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(f"✅ No applicable incident type classified. Initial analysis: {content}\n")
+        return {"incident_count": 0, "logs_file": str(logs_file)}
+
+    with open(report_path, "a", encoding="utf-8") as f:
+        f.write(f"**Initial analysis — {title}:**\n\n{content}\n")
+
+    # none_applicable is never itself a real incident to process.
+    seen, real_types = set(), []
+    for t in [primary_type] + list(secondary_types):
+        if t != NONE_APPLICABLE_INCIDENT_TYPE and t not in seen:
+            seen.add(t)
+            real_types.append(t)
+
+    if not real_types:
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write("\n✅ No applicable incident type classified beyond the initial analysis above.\n")
+        return {"incident_count": 0, "logs_file": str(logs_file)}
+
+    processed = 0
+    for incident_type, is_primary in [(t, i == 0) for i, t in enumerate(real_types)]:
+        if is_primary:
+            queries = _form_search_queries(title, content, incident_type)
+            search_results = _run_ddg_search(queries) if queries else []
+        else:
+            search_results = []
+        explainer = _explain_incident(title, content, incident_type, search_results)
+        section = _render_incident_section(incident_type, is_primary, explainer, search_results)
+
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(section + "\n")
+        processed += 1
+        # Nothing from this incident carries into the next iteration except
+        # what's already been written to disk.
+
+    return {"incident_count": processed, "logs_file": str(logs_file)}
+```
 
 **Why secondary incidents skip search**: every secondary finding was
 paying the same query-generation + 5x-DuckDuckGo-search cost as the
