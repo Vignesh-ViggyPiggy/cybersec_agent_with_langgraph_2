@@ -72,15 +72,25 @@ def _unflatten_metadata(metadata: dict) -> dict:
 
 @mcp.tool()
 def add_corpus_entry(id: str, explanation: str, metadata: dict) -> str:
-    """Add or update (upsert) one corpus entry. `explanation` is what gets
-    embedded for semantic search — the natural-language description, not
-    the file's raw content. A real content example (raw XML/text) belongs in
-    metadata (e.g. metadata["raw_content_example"]), stored and retrievable
+    """Add or replace one corpus entry. `explanation` is what gets embedded
+    for semantic search — the natural-language description, not the file's
+    raw content. A real content example (raw XML/text) belongs in metadata
+    (e.g. metadata["raw_content_examples"]), stored and retrievable
     alongside the explanation but deliberately not embedded itself, since
     embedding raw XML/text doesn't help similarity search the way a
-    description does."""
+    description does.
+
+    Deletes any existing entry for this id before adding the new one,
+    rather than using Chroma's upsert() directly — upsert's underlying
+    update() MERGES the metadata dict for an existing id instead of
+    replacing it, so a field renamed or removed in corpus_documents/*.json
+    (e.g. raw_content_example -> raw_content_examples) would otherwise
+    linger in the vector store forever instead of disappearing on the next
+    ingest_corpus.py run, confirmed via a real stale-field check against a
+    live corpus_db (2026-08-29)."""
     embedding = _embeddings.embed_query(explanation)
-    _collection.upsert(
+    _collection.delete(ids=[id])
+    _collection.add(
         ids=[id],
         embeddings=[embedding],
         documents=[explanation],
