@@ -164,6 +164,14 @@ Full detail (Rocky Linux 8 + Windows installers, tar packaging) is in
 scripts/package_release.sh          # builds dist/analysis_system.tar.gz, dist/hierarchy_system.tar.gz
 ```
 
+This needs `analysis_system/model/cybersecqwen.gguf` to exist first —
+either place it there yourself (next to the already-committed `Modelfile`;
+no Ollama needed on the packaging machine in that case), or run this on a
+machine that already has the model built in Ollama and let it call
+`scripts/export_model.sh` automatically. `package_release.sh` uses
+whichever `.gguf` is already present and only falls back to exporting from
+Ollama if none is found.
+
 On each target machine:
 
 ```bash
@@ -345,31 +353,42 @@ Sourced from `corpus_documents/attack_*.json`. `Multi-tag` means
 `status_tags` (plural) is set — detection triggers on *any* of the listed
 tags, computed once in `read_live_status_node`, not re-derived per tag.
 
-| Attack type | Status file | Tag(s) | Schema | Verification | Notes |
-|---|---|---|---|---|---|
-| `ransomware` | `Alert.xml` | `Ransom`, `bin`, `lib`, `honeypot`, `Process` (multi-tag) | binary_flag | requires_live_recompute | Any 1 of 5 = detected — deliberately stricter than the product's own internal 2-of-4 combined-score threshold |
-| `process_anomaly` | `Alert.xml` | `Process` | binary_flag | requires_live_recompute | Real threshold: current process count > 1.5x a 7-day running average (not a fixed "~50") |
-| `rootkit_malware` | `athinio/system/secOpsOutput_91` | N/A — text scan for `Warning:` | file_contains_pattern | opaque_binary_only | rkhunter's own `--report-warnings-only` output; sets no XML tag anywhere |
-| `unknown_binary_detection` | `Alert.xml` | `unknown_binary` | binary_flag | readable_report | Split out of `rootkit_malware`; `/proc/$pid/exe` enumeration against a 2-week learning-period baseline |
-| `config_drift` | `athinio/system/secOpsOutput_94` | N/A — text scan for `Tampered` | file_contains_pattern | opaque_binary_only | 24h grace window on new changes, 24h self-clearing auto-expiry |
-| `security_config` | `Alert.xml` | `security_config` | binary_flag | opaque_binary_only | No confirmed writer script in the bundle |
-| `user_breach` | `athinio/system/alertlog.xml` | `User_breach`, `suspicious_user_login` (multi-tag) | binary_flag | check_raw_logs | Real 2-stage detector (14-day baseline + 30-min failed-attempt escalation); the raw-log check here is a simpler approximate heuristic |
-| `gateway_unauthorized_breakin` | `Alert.xml` | `break-in` | binary_flag | check_raw_logs | Deterministic `"Break-in Attempt"` phrase match against rotated `gateway.log*` |
-| `gateway_breach_activity` | `Alert.xml` | `breachval` | binary_flag | requires_live_recompute | 7-day per-worker baseline, alerts at >=2x that baseline |
-| `gateway_ransomware_filesystem` | `Alert.xml` | `amsrans` | binary_flag | requires_live_recompute | `oneCloudFilerx`: >500 files changed within 1 hour |
-| `gateway_ransomware_backup` | `Alert.xml` | `tier_ran` | binary_flag | requires_live_recompute | Same class of check, scoped to the backup/tiered-storage path only |
-| `honeypot` | `Alert.xml` | `honeypot` | binary_flag | opaque_binary_only | Decoy-directory content diff |
-| `special_folder_monitoring` | `Alert.xml` | `special_files_honeypot` | binary_flag | readable_report | Per-admin-configured-folder honeypot/immutability/activity checks |
-| `immutable_attribute_drift` | `athinio/system/alertlog.xml` | `lsattr_status` | binary_flag | readable_report | `container`-named entries under `/home/nas/vdc0/` missing `chattr +i`, threshold 5+; does not roll up to `Alert.xml` |
-| `secure_vault_ransomware` | `athinio/system/alertlog.xml` | `SV_Ransom_current_status` | binary_flag | opaque_binary_only | `data_source_reliable: false` — the documented writer script doesn't actually contain this logic; always `cannot_determine` |
-| `clam_malware` | `athinio/security/malwarefiles.xml` | `nooffile` | count_greater_than_zero | opaque_binary_only | Per-file ClamAV scan markers, aggregated by a compiled binary |
-| `dlp_data_exposure` | `athinio/security/dataprotection.xml` | `nooffile` | count_greater_than_zero | opaque_binary_only | Same pattern as `clam_malware`; the underlying XML-write code is confirmed commented out in the deployed scanner, so a clean 0 may reflect a broken pipeline rather than "no findings" |
-| `banned_ip_bruteforce` | `var/neridio/banned_ip.xml` | N/A — file-presence check | file_non_empty | opaque_binary_only | fail2ban's own ban list |
-| `weak_password_accounts` | `athinio/system/user_emptypass_list.xml` | `NoOfAccounts` | count_greater_than_zero | opaque_binary_only | `/etc/shadow` empty-password scan |
-| `unauthorized_uid0_account` | `athinio/system/zero_uid.xml` | `NoOfExtraAccounts` | count_greater_than_zero | opaque_binary_only | `/etc/passwd` UID-0 scan; a confirmed real product bug writes the clean-state result to `weak_password_accounts`'s file instead of this one |
-| `orphaned_files` | `athinio/system/nouser_noowner.xml` | `NoOfFiles` | count_greater_than_zero | opaque_binary_only | `find -nouser -o -nogroup` |
-| `unauthorized_ddl` | `Alert.xml` | `drop_table`, `create_table`, `alter_table`, `truncate_table` (multi-tag) | binary_flag | opaque_binary_only | No confirmed writer script in the bundle |
-| `log_disable` | `Alert.xml` | `log_disable` | binary_flag | opaque_binary_only | No confirmed writer script in the bundle |
+**On the "Verified against" column**: only `readable_report`/
+`diffable_snapshot_files` and `check_raw_logs` types ever actually get a
+"not detected" reading independently checked (§5.1 steps 5a/5b) — that
+column names the exact file(s) that check reads. A `raw_evidence_files`
+entry in an attack type's corpus metadata does **not** always mean
+verification happens: for `requires_live_recompute` and `opaque_binary_only`
+types, any listed evidence file is only read afterwards, to show as
+corroborating detail *if* the tag is ever found `detected` — a clean read
+from one of those types is never cross-checked against anything, which is
+exactly what "unverifiable" in their status means.
+
+| Attack type | Status file | Tag(s) | Schema | Verification | Verified against | Notes |
+|---|---|---|---|---|---|---|
+| `ransomware` | `Alert.xml` | `Ransom`, `bin`, `lib`, `honeypot`, `Process` (multi-tag) | binary_flag | requires_live_recompute | *(none — not verified)* | Any 1 of 5 = detected — deliberately stricter than the product's own internal 2-of-4 combined-score threshold |
+| `process_anomaly` | `Alert.xml` | `Process` | binary_flag | requires_live_recompute | *(none — not verified; `rationalclient.log`/`osstatus.log` only shown if detected)* | Real threshold: current process count > 1.5x a 7-day running average (not a fixed "~50") |
+| `rootkit_malware` | `athinio/system/secOpsOutput_91` | N/A — text scan for `Warning:` | file_contains_pattern | opaque_binary_only | *(none — the scan of `secOpsOutput_91` IS the live read itself)* | rkhunter's own `--report-warnings-only` output; sets no XML tag anywhere |
+| `unknown_binary_detection` | `Alert.xml` | `unknown_binary` | binary_flag | readable_report | `athinio/system/secOpsOutput_112` | Split out of `rootkit_malware`; `/proc/$pid/exe` enumeration against a 2-week learning-period baseline |
+| `config_drift` | `athinio/system/secOpsOutput_94` | N/A — text scan for `Tampered` | file_contains_pattern | opaque_binary_only | *(none — the scan of `secOpsOutput_94` IS the live read itself)* | 24h grace window on new changes, 24h self-clearing auto-expiry |
+| `security_config` | `Alert.xml` | `security_config` | binary_flag | opaque_binary_only | *(none — no evidence file confirmed)* | No confirmed writer script in the bundle |
+| `user_breach` | `athinio/system/alertlog.xml` | `User_breach`, `suspicious_user_login` (multi-tag) | binary_flag | check_raw_logs | `var/log/secure*`, `rationalVault/log/rationalclient.log*` (deterministic sshd fail→accept regex) | Real 2-stage detector (14-day baseline + 30-min failed-attempt escalation); the raw-log check here is a simpler approximate heuristic |
+| `gateway_unauthorized_breakin` | `Alert.xml` | `break-in` | binary_flag | check_raw_logs | `home/athinio/data/1cloudFiler/log/gateway.log*` (deterministic `"Break-in Attempt"` phrase match) | Genuinely gateway/filer-specific, not an SSH pattern |
+| `gateway_breach_activity` | `Alert.xml` | `breachval` | binary_flag | requires_live_recompute | *(none — not verified; `secOpsOutput_105`/`breach.xml` only shown if detected)* | 7-day per-worker baseline, alerts at >=2x that baseline |
+| `gateway_ransomware_filesystem` | `Alert.xml` | `amsrans` | binary_flag | requires_live_recompute | *(none — not verified; `alertlog.xml` only shown if detected)* | `oneCloudFilerx`: >500 files changed within 1 hour |
+| `gateway_ransomware_backup` | `Alert.xml` | `tier_ran` | binary_flag | requires_live_recompute | *(none — not verified; `alertlog.xml` only shown if detected)* | Same class of check, scoped to the backup/tiered-storage path only |
+| `honeypot` | `Alert.xml` | `honeypot` | binary_flag | opaque_binary_only | *(none — not verified; `alertlog.xml` only shown if detected)* | Decoy-directory content diff |
+| `special_folder_monitoring` | `Alert.xml` | `special_files_honeypot` | binary_flag | readable_report | `athinio/system/secOpsOutput_128` | Per-admin-configured-folder honeypot/immutability/activity checks |
+| `immutable_attribute_drift` | `athinio/system/alertlog.xml` | `lsattr_status` | binary_flag | readable_report | `athinio/system/secOpsOutput_96`, `athinio/tmp/imm_changes` | `container`-named entries under `/home/nas/vdc0/` missing `chattr +i`, threshold 5+; does not roll up to `Alert.xml` |
+| `secure_vault_ransomware` | `athinio/system/alertlog.xml` | `SV_Ransom_current_status` | binary_flag | opaque_binary_only | *(none — never reached)* | `data_source_reliable: false` short-circuits straight to `cannot_determine` before any file is even read |
+| `clam_malware` | `athinio/security/malwarefiles.xml` | `nooffile` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | Per-file ClamAV scan markers, aggregated by a compiled binary |
+| `dlp_data_exposure` | `athinio/security/dataprotection.xml` | `nooffile` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | Same pattern as `clam_malware`; the underlying XML-write code is confirmed commented out in the deployed scanner, so a clean 0 may reflect a broken pipeline rather than "no findings" |
+| `banned_ip_bruteforce` | `var/neridio/banned_ip.xml` | N/A — file-presence check | file_non_empty | opaque_binary_only | *(none — the status file itself is the evidence)* | fail2ban's own ban list |
+| `weak_password_accounts` | `athinio/system/user_emptypass_list.xml` | `NoOfAccounts` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | `/etc/shadow` empty-password scan |
+| `unauthorized_uid0_account` | `athinio/system/zero_uid.xml` | `NoOfExtraAccounts` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | `/etc/passwd` UID-0 scan; a confirmed real product bug writes the clean-state result to `weak_password_accounts`'s file instead of this one |
+| `orphaned_files` | `athinio/system/nouser_noowner.xml` | `NoOfFiles` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | `find -nouser -o -nogroup` |
+| `unauthorized_ddl` | `Alert.xml` | `drop_table`, `create_table`, `alter_table`, `truncate_table` (multi-tag) | binary_flag | opaque_binary_only | *(none — no evidence file confirmed)* | No confirmed writer script in the bundle |
+| `log_disable` | `Alert.xml` | `log_disable` | binary_flag | opaque_binary_only | *(none — no evidence file confirmed)* | No confirmed writer script in the bundle |
 
 For the full narrative behind any row above — real product bugs found,
 mechanism corrections, confirmed-live examples — see that attack type's

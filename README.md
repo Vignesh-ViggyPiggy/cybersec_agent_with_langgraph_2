@@ -177,21 +177,30 @@ services) — install.sh only installs dependencies and ingests the corpus
 once; you bring the actual long-running processes up yourself afterward
 with a plain starter script.
 
-### 8.1 Build the tarballs (on a machine that already has the model)
+### 8.1 Build the tarballs
 
 ```bash
 scripts/package_release.sh
 ```
 
-This exports the real weights of the local Ollama `cybersecqwen` model (via
-`scripts/export_model.sh`) into `analysis_system/model/cybersecqwen.gguf`
-alongside a self-contained `model/Modelfile`, then produces:
+Needs `analysis_system/model/cybersecqwen.gguf` to exist first — two ways
+to get there, and `package_release.sh` picks whichever is already present:
+
+- **Manual:** copy your own `cybersecqwen.gguf` into `analysis_system/model/`
+  yourself (next to the already-committed `Modelfile`) — used as-is, no
+  Ollama needed on the packaging machine.
+- **Automatic:** run this on a machine that already has the model built in
+  Ollama and skip the manual copy — `package_release.sh` calls
+  `scripts/export_model.sh`, which pulls the real weights out of Ollama's
+  own blob store and writes both the `.gguf` and a matching `Modelfile`.
+
+Either way it then produces:
 
 - `dist/analysis_system.tar.gz`
 - `dist/hierarchy_system.tar.gz`
 
-Neither the exported `.gguf` nor `dist/` are committed to git (see
-`.gitignore`) — they're multi-gigabyte build output, regenerated on demand.
+Neither the `.gguf` nor `dist/` are committed to git (see `.gitignore`) —
+they're multi-gigabyte build/binary output.
 
 ### 8.2 Install on the target machine
 
