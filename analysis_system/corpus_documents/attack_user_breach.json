@@ -3,24 +3,62 @@
   "explanation": "User account breach detected -- unauthorized or anomalous access to user accounts. MECHANISM REBUILT FROM REAL SOURCE (2026-08-28): the actual continuous detector is /athinio/bin/secOpsScript_113_bkp, a daemon that tails /var/log/secure live. It's a genuine TWO-STAGE detector, not a simple brute-force pattern: Stage 1 (after a 14-day per-user baseline period) flags a login as merely SUSPICIOUS -- either a brand-new user, or an existing user logging in >=4 hours outside their established earliest-login/last-logout baseline -- and sets alertlog.xml's suspicious_user_login=1 only. Stage 2 watches for 'Failed password'/'authentication failure' lines for that SAME user; if >=3 failed attempts land within a 30-minute window of the suspicious login, it escalates to User_breach=1. A separate wrapper script, /athinio/bin/secOpsScript_113 (no _bkp suffix), manages the daemon (starts/stops it, ensures it's running) and handles admin actions -- locking breached users' accounts (lock_breached_users via param_cmd_113.xml), and both operator-triggered and automatic 24-hour ignore/reset (an unaddressed breach alert self-clears after 24h with no operator response, same pattern as config_drift's auto-expiry). Critically, this wrapper's own secOpsOutput_113 output is NOT independent evidence -- it just reads back the CURRENT User_breach tag value and writes it as a human-readable line ('Info : No user breach detected' / 'Attack : User Breach detected'), the exact same restated-conclusion problem found and fixed in gateway_breach_activity. Do not treat secOpsOutput_113 as corroboration.",
   "metadata": {
     "attack_type": "user_breach",
-    "status_file": "athinio/system/alertlog.xml",
-    "status_tag": "User_breach",
-    "status_tags": ["User_breach", "suspicious_user_login"],
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "athinio/system/alertlog.xml",
+        "read_as": "xml_tag",
+        "tag": "User_breach",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Detected."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean."
+      },
+      {
+        "tier": "primary",
+        "file": "athinio/system/alertlog.xml",
+        "read_as": "xml_tag",
+        "tag": "suspicious_user_login",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Detected."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean."
+      },
+      {
+        "tier": "verification",
+        "file": [
+          "var/log/secure",
+          "rationalVault/log/rationalclient.log"
+        ],
+        "read_as": "text",
+        "rotates": true,
+        "known_patterns": [
+          {
+            "pattern": "sshd\\[\\d+\\]:\\s+Failed password for (?:invalid user )?\\S+ from (?P<ip>\\d{1,3}(?:\\.\\d{1,3}){3}).*?sshd\\[\\d+\\]:\\s+Accepted password for \\S+ from (?P=ip)",
+            "flags": [
+              "DOTALL"
+            ],
+            "detected": true,
+            "meaning": "Found failed password attempts followed by a successful password login from the same source address."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "No matching pattern found in the available logs."
+      }
+    ],
     "writer_script": "/athinio/bin/secOpsScript_113_bkp (real continuous detector, tails var/log/secure) -- managed/reported by /athinio/bin/secOpsScript_113 (wrapper: admin lock/unlock, ignore/auto-ignore reset, restates the tag to secOpsOutput_113)",
     "ui_feature_name": "User Breach Detection",
     "confidence": "verified -- both scripts' real source read directly",
-    "verification_category": "check_raw_logs",
-    "value_schema": {"type": "binary_flag"},
-    "value_meanings": {
-      "User_breach=0, suspicious_user_login=0": "Clean -- no anomalous login timing flagged for any user since the last reset/baseline.",
-      "User_breach=0, suspicious_user_login=1": "Precursor stage only -- a login was flagged anomalous (new user after the 14-day baseline, or badly-timed vs. that user's established pattern), but it has not (yet, or ever) accumulated >=3 failed password attempts within 30 minutes to escalate to a confirmed breach. Confirmed live and active on hierarchy 5/101/1/4/1 (2026-08-28) -- this state is real and currently ignored by any workflow that only reads Alert.xml's user_breach tag, since this tag doesn't roll up there.",
-      "User_breach=1": "Confirmed breach -- a flagged-suspicious login was followed by >=3 failed password attempts for that same user within a 30-minute window."
-    },
-    "caveat": "TAG SOURCE CORRECTED (2026-08-28): status_file moved from Alert.xml to athinio/system/alertlog.xml, because suspicious_user_login -- a real, currently-active signal on the real test hierarchy -- does not roll up to Alert.xml at all (confirmed absent from its 41-tag schema); alertlog.xml is the only place both tags exist. EVIDENCE QUALITY FIX: secOpsOutput_113 was previously treated as a 'supplementary source' cross-check, but its real source (secOpsScript_113, the wrapper) shows it only restates the current User_breach tag value as text -- it is not independent evidence and has been removed as a cross-check for the same reason gateway_breach_activity's secOpsOutput_105 was retired from that role. MECHANISM GAP: the check_raw_logs regex this workflow actually runs (SSHD_FAIL_RE/SSHD_ACCEPT_RE -- a failed-then-accepted-password-from-the-same-IP pattern) is a DIFFERENT, simpler heuristic than the real two-stage algorithm above. The real algorithm is inherently stateful (a 14-day per-user baseline in user_sessions.xml, per-user failed-attempt counters in athinio/system/failed_logins/, a 30-minute escalation window) and can't be faithfully reproduced by a stateless fresh-scan-of-the-raw-log check. The current regex check is kept as a secondary, approximate signal -- real brute-force activity it catches is still worth flagging -- but it should not be presented as verifying the product's actual mechanism, only as an independent heuristic that happens to look for a related pattern.",
-    "raw_content_examples": [
-      {"label": "clean", "content": "<System_Policy_Management>\n  <User_breach>0</User_breach>\n  <suspicious_user_login>0</suspicious_user_login>\n</System_Policy_Management>", "note": "No anomalous login activity flagged for any user."},
-      {"label": "precursor stage -- confirmed live", "content": "<System_Policy_Management>\n  <User_breach>0</User_breach>\n  <suspicious_user_login>1</suspicious_user_login>\n</System_Policy_Management>", "note": "Confirmed live on real hierarchy 5/101/1/4/1, 2026-08-28. A login was flagged anomalous but hasn't escalated to a confirmed breach -- worth surfacing even though the classic user_breach tag alone would read clean."},
-      {"label": "confirmed breach (illustrative, per confirmed script logic)", "content": "<System_Policy_Management>\n  <User_breach>1</User_breach>\n  <suspicious_user_login>1</suspicious_user_login>\n</System_Policy_Management>", "note": "Illustrative -- a flagged-suspicious login was followed by 3+ failed password attempts within 30 minutes for that same user. Not directly observed as a live detection."}
-    ]
+    "caveat": "TAG SOURCE CORRECTED (2026-08-28): status_file moved from Alert.xml to athinio/system/alertlog.xml, because suspicious_user_login -- a real, currently-active signal on the real test hierarchy -- does not roll up to Alert.xml at all (confirmed absent from its 41-tag schema); alertlog.xml is the only place both tags exist. EVIDENCE QUALITY FIX: secOpsOutput_113 was previously treated as a 'supplementary source' cross-check, but its real source (secOpsScript_113, the wrapper) shows it only restates the current User_breach tag value as text -- it is not independent evidence and has been removed as a cross-check for the same reason gateway_breach_activity's secOpsOutput_105 was retired from that role. MECHANISM GAP: the check_raw_logs regex this workflow actually runs (SSHD_FAIL_RE/SSHD_ACCEPT_RE -- a failed-then-accepted-password-from-the-same-IP pattern) is a DIFFERENT, simpler heuristic than the real two-stage algorithm above. The real algorithm is inherently stateful (a 14-day per-user baseline in user_sessions.xml, per-user failed-attempt counters in athinio/system/failed_logins/, a 30-minute escalation window) and can't be faithfully reproduced by a stateless fresh-scan-of-the-raw-log check. The current regex check is kept as a secondary, approximate signal -- real brute-force activity it catches is still worth flagging -- but it should not be presented as verifying the product's actual mechanism, only as an independent heuristic that happens to look for a related pattern."
   }
 }

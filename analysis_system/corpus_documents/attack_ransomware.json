@@ -3,37 +3,88 @@
   "explanation": "Ransomware attack detected -- files, binaries, or libraries are being tampered with. This attack type checks FIVE tags in Alert.xml, any one of which is treated as an indicator: Ransom (the product's own ransomware verdict -- a file-count/content-diff check against a reference copy), bin (system binary directory tampering), lib (system library directory tampering), honeypot (a decoy file was tampered with), and Process (the running process count deviated abnormally from its baseline). The product's own internal logic (confirmed from real source, 2026-08-28) treats honeypot, a single down decoy process, lib/bin drift, and process anomaly as four inputs to a combined score, and only writes Ransom=1 once at least two of those four are active together -- so Ransom's own value already reflects combinations even when checked alone. bin, lib, honeypot, and Process are ALSO checked directly here, independent of Ransom, because that combined recomputation isn't guaranteed to have run recently enough to be current -- if honeypot and a process anomaly are BOTH active right now but the product hasn't recomputed Ransom yet, checking Ransom alone would miss it. Any single one of the five tags reading 1 is treated as detected by this workflow -- deliberately stricter than the product's own 2-of-4 threshold for the honeypot/decoy/lib-bin/process combination, since under-reporting a real security signal is worse than an occasional single-factor flag.",
   "metadata": {
     "attack_type": "ransomware",
-    "status_file": "Alert.xml",
-    "status_tag": "Ransom",
-    "status_tags": ["Ransom", "bin", "lib", "honeypot", "Process"],
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "Ransom",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Ransomware indicator active for that specific tag -- Ransom=1 means a file-count/content mismatch was found, or the product's own combined score already reached its threshold; bin=1/lib=1 means a direct binary/library modification was found; honeypot=1 means a decoy file was tampered with; Process=1 means the process count deviated abnormally. Any one alone is enough to flag this workflow's 'detected' status, even though the product itself only escalates to Ransom=1 from honeypot/decoy/process factors once two of them agree."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean for that specific tag. All five must be 0 for a clean overall result."
+      },
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "bin",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Ransomware indicator active for that specific tag -- Ransom=1 means a file-count/content mismatch was found, or the product's own combined score already reached its threshold; bin=1/lib=1 means a direct binary/library modification was found; honeypot=1 means a decoy file was tampered with; Process=1 means the process count deviated abnormally. Any one alone is enough to flag this workflow's 'detected' status, even though the product itself only escalates to Ransom=1 from honeypot/decoy/process factors once two of them agree."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean for that specific tag. All five must be 0 for a clean overall result."
+      },
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "lib",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Ransomware indicator active for that specific tag -- Ransom=1 means a file-count/content mismatch was found, or the product's own combined score already reached its threshold; bin=1/lib=1 means a direct binary/library modification was found; honeypot=1 means a decoy file was tampered with; Process=1 means the process count deviated abnormally. Any one alone is enough to flag this workflow's 'detected' status, even though the product itself only escalates to Ransom=1 from honeypot/decoy/process factors once two of them agree."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean for that specific tag. All five must be 0 for a clean overall result."
+      },
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "honeypot",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Ransomware indicator active for that specific tag -- Ransom=1 means a file-count/content mismatch was found, or the product's own combined score already reached its threshold; bin=1/lib=1 means a direct binary/library modification was found; honeypot=1 means a decoy file was tampered with; Process=1 means the process count deviated abnormally. Any one alone is enough to flag this workflow's 'detected' status, even though the product itself only escalates to Ransom=1 from honeypot/decoy/process factors once two of them agree."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean for that specific tag. All five must be 0 for a clean overall result."
+      },
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "Process",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Ransomware indicator active for that specific tag -- Ransom=1 means a file-count/content mismatch was found, or the product's own combined score already reached its threshold; bin=1/lib=1 means a direct binary/library modification was found; honeypot=1 means a decoy file was tampered with; Process=1 means the process count deviated abnormally. Any one alone is enough to flag this workflow's 'detected' status, even though the product itself only escalates to Ransom=1 from honeypot/decoy/process factors once two of them agree."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean for that specific tag. All five must be 0 for a clean overall result."
+      }
+    ],
     "writer_script": "/athinio/bin/secOps_ransCheck (Ransom -- file-count + content diff) and /athinio/bin/secOpsScript_78 (Ransom, via a combined honeypot/decoy-process/lib-bin/process-anomaly score) and /athinio/bin/Alert1.sh (bin, lib) and /athinio/bin/rChecker_md.sh + secOpsScript_78 (honeypot) and /athinio/bin/secOpsScript_98 (Process)",
     "ui_feature_name": "Ransomware Check (rChecker)",
     "ui_feature_name_note": "Inferred from cmd_in.xml's confirmed per-hierarchy feature-status tag 'rchecker' -- this is the best available evidence of the dashboard-facing name, not a directly observed rendered UI label. Confirm against the actual dashboard before using this in a customer-facing message.",
     "confidence": "verified -- all writer scripts' real source read directly (2026-08-28)",
-    "verification_category": "requires_live_recompute",
-    "value_schema": {"type": "binary_flag"},
-    "value_meanings": {
-      "0": "Clean for that specific tag. All five must be 0 for a clean overall result.",
-      "1": "Ransomware indicator active for that specific tag -- Ransom=1 means a file-count/content mismatch was found, or the product's own combined score already reached its threshold; bin=1/lib=1 means a direct binary/library modification was found; honeypot=1 means a decoy file was tampered with; Process=1 means the process count deviated abnormally. Any one alone is enough to flag this workflow's 'detected' status, even though the product itself only escalates to Ransom=1 from honeypot/decoy/process factors once two of them agree."
-    },
     "caveat": "COVERAGE FIX (2026-08-28): honeypot and Process were previously left out of status_tags on the reasoning that neither alone confirms ransomware in the product's own logic -- that reasoning was correct about the product's own threshold, but wrong as a basis for what THIS workflow checks: leaving them out meant a live honeypot+process-anomaly combination that the product itself would treat as real ransomware could go completely undetected here if Ransom's own tag hadn't been recomputed recently. Now included, with detection set to 'any one of the five' rather than trying to replicate the product's 2-of-4 combination logic in this workflow -- deliberately more sensitive than the product's own internal threshold. Historically confirmed live (5/101/1/4/1, 2026-08-27): Ransom read 0 while bin and lib both read 1 in the same live Alert.xml -- checking Ransom alone would have produced a false negative on a real active flag, which is the same class of gap this fix closes for honeypot/Process. Also newly confirmed: secOps_ransCheck separately checks a database-ransomware variant (DB_Ransom_current_status, via Ransomdb.xml if present) -- not yet modeled as its own attack type.",
-    "raw_content_examples": [
-      {
-        "label": "clean (all five tags)",
-        "content": "<ALERT>\n  <Ransom>0</Ransom>\n  <bin>0</bin>\n  <lib>0</lib>\n  <honeypot>0</honeypot>\n  <Process>0</Process>\n</ALERT>",
-        "note": "Normal state -- no indicator active."
-      },
-      {
-        "label": "detected via bin/lib, Ransom itself clean -- confirmed live pattern",
-        "content": "<ALERT>\n  <Ransom>0</Ransom>\n  <bin>1</bin>\n  <lib>1</lib>\n  <honeypot>0</honeypot>\n  <Process>0</Process>\n</ALERT>",
-        "note": "Confirmed live on real hierarchy 5/101/1/4/1, 2026-08-27. Direct binary/library tampering flagged while the tag that's supposed to summarize it (Ransom) hadn't caught up yet."
-      },
-      {
-        "label": "detected via honeypot + Process combination (illustrative, matches the product's own threshold)",
-        "content": "<ALERT>\n  <Ransom>0</Ransom>\n  <bin>0</bin>\n  <lib>0</lib>\n  <honeypot>1</honeypot>\n  <Process>1</Process>\n</ALERT>",
-        "note": "Illustrative -- this is exactly the combination the product's own secOpsScript_78 logic would escalate to Ransom=1 for, but if that recomputation hasn't run yet, only checking honeypot and Process directly catches it."
-      }
-    ],
     "related_entries": "ransw_xml, config_xml_ransom_fields"
   }
 }

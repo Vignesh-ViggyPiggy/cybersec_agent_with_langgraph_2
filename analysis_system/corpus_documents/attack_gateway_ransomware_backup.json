@@ -3,22 +3,26 @@
   "explanation": "Backup / tiered-storage (tierNAS) level ransomware detection -- confirmed via a real product QA test spec (2026-08-27). A dedicated backup-tier binary (documented only as '<backup binary>', exact name not given in the source spec) updates /athinio/security/tierNAS_ransomware.xml's <RansomDetected> tag to 'YES' when it detects tampering. /athinio/bin/gatewayMonitor.sh reads that file and sets /athinio/system/alertlog.xml's <tierNas_ransom> to 1, which rolls up directly to Alert.xml's tier_ran tag. The documented test case is overwriting 5 files and running scr_cron, which should then update more than 5 files inside oneCloud/Backup -- i.e. this checks tampering specifically within the backup/tiered-storage path, not the live production filesystem oneCloudFilerx watches for gateway_ransomware_filesystem.",
   "metadata": {
     "attack_type": "gateway_ransomware_backup",
-    "status_file": "Alert.xml",
-    "status_tag": "tier_ran",
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "tier_ran",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Backup-level ransomware detected -- files within the tiered-storage backup path were tampered with, per the documented test pattern of overwriting backup files faster than the normal backup-cron cadence accounts for."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean -- no tampering detected in the backup/tiered-storage path (oneCloud/Backup) since the last reset. Confirmed live on real hierarchy 5/101/1/4/1 (2026-08-27)."
+      }
+    ],
     "writer_script": "backup-tier binary (exact name not confirmed in source spec) -> /athinio/security/tierNAS_ransomware.xml's RansomDetected -> /athinio/bin/gatewayMonitor.sh -> athinio/system/alertlog.xml's tierNas_ransom, rolling up to Alert.xml's tier_ran",
     "ui_feature_name": "Backup Level Ransomware",
     "confidence": "verified mechanism per a real product QA test spec, but the specific backup-tier binary name was not given in that source; tier_ran/tierNas_ransom both confirmed present and reading 0 (clean) on a real hierarchy",
-    "verification_category": "requires_live_recompute",
-    "value_schema": {"type": "binary_flag"},
-    "raw_evidence_files": ["athinio/system/alertlog.xml"],
-    "value_meanings": {
-      "0": "Clean -- no tampering detected in the backup/tiered-storage path (oneCloud/Backup) since the last reset. Confirmed live on real hierarchy 5/101/1/4/1 (2026-08-27).",
-      "1": "Backup-level ransomware detected -- files within the tiered-storage backup path were tampered with, per the documented test pattern of overwriting backup files faster than the normal backup-cron cadence accounts for."
-    },
-    "caveat": "requires_live_recompute for the same reason as gateway_ransomware_filesystem -- the underlying trigger is inside a compiled binary this workflow can't independently re-derive from a snapshot. Distinct from BOTH the plain 'ransomware' entry (production-path RefCopy/bin/lib diff) and 'gateway_ransomware_filesystem' (oneCloudFilerx's live production file-count threshold) -- this one is scoped specifically to the backup/tiered-storage copy, so a clean read here does not imply the production copies are also clean, and vice versa.",
-    "raw_content_examples": [
-      {"label": "clean", "content": "<ALERT>\n  <tier_ran>0</tier_ran>\n</ALERT>", "note": "Confirmed live on real hierarchy 5/101/1/4/1, 2026-08-27."},
-      {"label": "detected (illustrative, per confirmed test case)", "content": "/athinio/security/tierNAS_ransomware.xml:\n<RansomDetected>YES</RansomDetected>\n\n<ALERT>\n  <tier_ran>1</tier_ran>\n</ALERT>", "note": "Illustrative based on the confirmed test case (overwrite 5 backup files, run scr_cron, backup path shows >5 files changed) -- exact tierNAS_ransomware.xml schema not directly observed."}
-    ]
+    "caveat": "requires_live_recompute for the same reason as gateway_ransomware_filesystem -- the underlying trigger is inside a compiled binary this workflow can't independently re-derive from a snapshot. Distinct from BOTH the plain 'ransomware' entry (production-path RefCopy/bin/lib diff) and 'gateway_ransomware_filesystem' (oneCloudFilerx's live production file-count threshold) -- this one is scoped specifically to the backup/tiered-storage copy, so a clean read here does not imply the production copies are also clean, and vice versa."
   }
 }

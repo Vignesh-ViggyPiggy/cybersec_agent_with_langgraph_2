@@ -3,21 +3,26 @@
   "explanation": "Security configuration drift detected -- unauthorized changes to security settings. The security_config tag in Alert.xml is a coarse companion flag to config_drift's more granular Alert_config_lin.xml breakdown: 0 means clean, 1 means some security-relevant setting changed. No script that sets this specific tag to 1 was found in this bundle.",
   "metadata": {
     "attack_type": "security_config",
-    "status_file": "Alert.xml",
-    "status_tag": "security_config",
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "security_config",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Security configuration change flagged -- some security-relevant setting was altered (exact scope unconfirmed; may overlap with config_drift's more granular per-field breakdown)."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean -- no security-setting change flagged."
+      }
+    ],
     "writer_script": "unknown -- no detection writer found in this bundle, only reset writers",
     "confidence": "inferred, low",
-    "verification_category": "opaque_binary_only",
-    "value_schema": {"type": "binary_flag"},
-    "value_meanings": {
-      "0": "Clean -- no security-setting change flagged.",
-      "1": "Security configuration change flagged -- some security-relevant setting was altered (exact scope unconfirmed; may overlap with config_drift's more granular per-field breakdown)."
-    },
     "caveat": "Zero confirmed detectors for this specific tag. Likely related to configdrift.sh's more detailed per-field output, but the relationship (does configdrift.sh also set this coarse flag, or is it entirely separate?) was never confirmed.",
-    "raw_content_examples": [
-      {"label": "clean", "content": "<ALERT>\n  <security_config>0</security_config>\n</ALERT>", "note": "No security config change flagged."},
-      {"label": "detected", "content": "<ALERT>\n  <security_config>1</security_config>\n</ALERT>", "note": "A security-relevant configuration change was flagged -- cross-check attack_config_drift's per-field breakdown for the specific change, since the relationship between the two isn't confirmed."}
-    ],
     "related_entries": "attack_config_drift"
   }
 }

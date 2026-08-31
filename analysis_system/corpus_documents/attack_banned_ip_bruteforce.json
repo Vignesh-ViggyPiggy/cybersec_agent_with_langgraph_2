@@ -3,19 +3,23 @@
   "explanation": "Brute-force login tracking via fail2ban. getbannedip.sh parses 'fail2ban-client status sshd' and writes the result toward banned_ip.xml. Unlike most other entries in this corpus, the detection mechanism here isn't a tag value at all -- it's whether the file has any content. This is confirmed by cross-referencing scanning-lin.py's own logic, which checks this exact file via is_file_empty_or_non_existent(): a missing or empty file means no bans are currently recorded (clean), and any content at all means fail2ban has actively banned at least one IP for repeated failed logins.",
   "metadata": {
     "attack_type": "banned_ip_bruteforce",
-    "status_file": "var/neridio/banned_ip.xml",
-    "status_tag": "N/A -- file-presence check, not a tag read",
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "var/neridio/banned_ip.xml",
+        "read_as": "text",
+        "known_patterns": [
+          {
+            "non_empty": true,
+            "detected": true,
+            "meaning": "At least one IP is currently banned by fail2ban for repeated failed SSH login attempts -- an active or recent brute-force attempt occurred against this system."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean -- fail2ban has no currently-banned IPs for sshd."
+      }
+    ],
     "writer_script": "getbannedip.sh",
-    "confidence": "verified -- the file-emptiness detection logic is directly confirmed via scanning-lin.py's is_file_empty_or_non_existent() call on this exact path",
-    "verification_category": "opaque_binary_only",
-    "value_schema": {"type": "file_non_empty"},
-    "value_meanings": {
-      "file missing or empty": "Clean -- fail2ban has no currently-banned IPs for sshd.",
-      "file has any content": "At least one IP is currently banned by fail2ban for repeated failed SSH login attempts -- an active or recent brute-force attempt occurred against this system."
-    },
-    "raw_content_examples": [
-      {"label": "clean", "content": "(file does not exist, or exists with zero bytes)", "note": "No bans currently active."},
-      {"label": "detected (reconstructed)", "content": "192.0.2.55\n203.0.113.12", "note": "SPECULATIVE exact format -- fail2ban-client's own output is typically a list of banned IPs; the precise format getbannedip.sh writes into this specific file wasn't directly observed, only that its presence/absence is what's checked."}
-    ]
+    "confidence": "verified -- the file-emptiness detection logic is directly confirmed via scanning-lin.py's is_file_empty_or_non_existent() call on this exact path"
   }
 }

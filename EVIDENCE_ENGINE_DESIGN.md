@@ -1,11 +1,17 @@
 # Design: A Generic, Data-Driven Evidence Engine for Attack-Status Checks
 
-**Status: proposal — not implemented.** This document describes a redesign
+**Status: implemented (2026-08-31).** This document describes the redesign
 of `attack_status_workflow.py`'s core graph so that adding a new attack
 type of any of the 12 evidence shapes in
 [ADDING_ATTACK_TYPES.md](ADDING_ATTACK_TYPES.md) never requires a Python
-change — only a `corpus_documents/attack_<type>.json` entry. Written for
-review before touching the working pipeline.
+change — only a `corpus_documents/attack_<type>.json` entry. Implemented
+via `scripts/migrate_corpus_schema.py` (all 23 existing entries migrated)
+and a rewritten `attack_status_workflow.py`; validated for exact
+`final_status` parity against the pre-refactor graph across all 23 attack
+types on a real hierarchy before cutover. See DOCUMENTATION.md §5 for the
+as-built version — some details below (matching-key naming, the exact
+`known_patterns` matcher kinds) were refined slightly during
+implementation; this document is kept as the original design record.
 
 ---
 

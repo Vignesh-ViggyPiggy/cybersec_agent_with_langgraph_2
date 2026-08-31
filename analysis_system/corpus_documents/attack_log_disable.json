@@ -3,20 +3,25 @@
   "explanation": "Log disabling detected -- an attacker disabled system logs to hide malicious activity. The log_disable tag in Alert.xml is the flag consumers read: 0 means clean, 1 means logging was found disabled. No script that sets this tag to 1 was found in this bundle. errorlogcheck.sh is a related but distinct file, repairing corrupted ErrLogFile.xml rather than detecting deliberate log tampering.",
   "metadata": {
     "attack_type": "log_disable",
-    "status_file": "Alert.xml",
-    "status_tag": "log_disable",
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "log_disable",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Log disabling flagged -- system logging was found turned off or interfered with, a classic anti-forensics move to hide subsequent malicious activity."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean -- system logging is active and no disabling was flagged."
+      }
+    ],
     "writer_script": "unknown -- no detection writer found in this bundle, only reset writers",
     "confidence": "inferred, low",
-    "verification_category": "opaque_binary_only",
-    "value_schema": {"type": "binary_flag"},
-    "value_meanings": {
-      "0": "Clean -- system logging is active and no disabling was flagged.",
-      "1": "Log disabling flagged -- system logging was found turned off or interfered with, a classic anti-forensics move to hide subsequent malicious activity."
-    },
-    "caveat": "Zero confirmed detectors for this specific tag. errorlogcheck.sh is defensive (repairs corrupted logs) not detective (doesn't flag deliberate tampering) -- don't confuse the two when tracing this attack type.",
-    "raw_content_examples": [
-      {"label": "clean", "content": "<ALERT>\n  <log_disable>0</log_disable>\n</ALERT>", "note": "Logging active, no tampering flagged."},
-      {"label": "detected", "content": "<ALERT>\n  <log_disable>1</log_disable>\n</ALERT>", "note": "Logging was found disabled -- treat as high-priority, since this typically means an attacker is actively trying to hide other activity happening around the same time. Check what else changed in this same window."}
-    ]
+    "caveat": "Zero confirmed detectors for this specific tag. errorlogcheck.sh is defensive (repairs corrupted logs) not detective (doesn't flag deliberate tampering) -- don't confuse the two when tracing this attack type."
   }
 }

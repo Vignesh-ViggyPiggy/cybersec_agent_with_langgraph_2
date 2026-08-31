@@ -3,21 +3,26 @@
   "explanation": "Unexpected UID-0 (root-equivalent) account audit. Usr_info -uid dumps every account with UID 0 from /etc/passwd. Exactly one such account -- literally named 'root' -- is expected on any Linux system; any additional UID-0 account, regardless of its name, is functionally a full backdoor, since UID 0 grants root privileges no matter what the login name says. This is the same category of finding rkhunter's own UID-0 warning check produces, but from a dedicated script rather than a general rootkit scanner.",
   "metadata": {
     "attack_type": "unauthorized_uid0_account",
-    "status_file": "athinio/system/zero_uid.xml",
-    "status_tag": "NoOfExtraAccounts",
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "athinio/system/zero_uid.xml",
+        "read_as": "xml_tag",
+        "tag": "NoOfExtraAccounts",
+        "known_patterns": [
+          {
+            "min_value": 1,
+            "detected": true,
+            "meaning": "N accounts besides 'root' have UID 0 -- treat this as a confirmed backdoor until proven otherwise, not a low-severity finding. This is the same class of concern as rootkitscan_txt's UID-0 warning example, seen from a different tool."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean -- only the standard 'root' account has UID 0."
+      }
+    ],
     "writer_script": "Usr_info -uid (via largefiles.py)",
     "confidence": "script mechanism verified (reads /etc/passwd directly); exact output filename and tag name are inferred from the temp-file naming pattern (/ZEROUID), not directly observed in a real XML file",
-    "verification_category": "opaque_binary_only",
-    "value_schema": {"type": "count_greater_than_zero"},
-    "value_meanings": {
-      "0": "Clean -- only the standard 'root' account has UID 0.",
-      "N (N>=1)": "N accounts besides 'root' have UID 0 -- treat this as a confirmed backdoor until proven otherwise, not a low-severity finding. This is the same class of concern as rootkitscan_txt's UID-0 warning example, seen from a different tool."
-    },
     "caveat": "Exact status_file/status_tag names are inferred, not confirmed against a real populated example. REAL PRODUCT BUG CONFIRMED (2026-08-27, from a real product QA test spec, secOpsScript_40): when ZEROUID (the raw find/awk output) is empty, the script's clean-state branch touches 'user_emptypass_list.xml' -- the WEAK-PASSWORD attack type's output file, not 'zero_uid.xml' -- described in the source spec itself as an apparent copy/paste bug. This means zero_uid.xml may never actually get created on a clean run, which would make this attack type read as not_configured (file missing) even when the real underlying check ran and found nothing wrong -- don't assume not_configured means 'never checked' for this specific attack type without also considering this known bug.",
-    "raw_content_examples": [
-      {"label": "clean (reconstructed)", "content": "<ZeroUidAccounts>\n  <NoOfExtraAccounts>0</NoOfExtraAccounts>\n</ZeroUidAccounts>", "note": "SPECULATIVE format -- only 'root' has UID 0."},
-      {"label": "detected (reconstructed)", "content": "<ZeroUidAccounts>\n  <NoOfExtraAccounts>1</NoOfExtraAccounts>\n  <Account1>admin2</Account1>\n</ZeroUidAccounts>", "note": "SPECULATIVE -- an account named 'admin2' with UID 0 is fully root-equivalent regardless of its name, matching the same pattern flagged in rootkitscan_txt's example."}
-    ],
     "related_entries": "rootkitscan_txt"
   }
 }

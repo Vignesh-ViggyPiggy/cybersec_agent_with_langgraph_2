@@ -3,22 +3,50 @@
   "explanation": "Immutable attribute drift -- files under /home/nas/vdc0/ that should be locked (chattr +i) but currently aren't. CONFIRMED FROM REAL SOURCE (2026-08-28), matching the earlier QA-doc-sourced description almost exactly, plus one refined detail: /athinio/bin/secOpsScript_96 truncates athinio/system/secOpsOutput_96 at the start of each run, temporarily unlocks alertlog.xml itself (chattr -i) to update it, then runs 'lsattr -aR /home/nas/vdc0/', keeping only lines containing the word 'container' (a real, specific filter -- not every file under that path counts, only ones whose path/entry includes 'container'), and further excluding lines that already show the immutable bit set (grep -v '\\-i\\-'). So the count is really 'containers that should be immutable but currently aren't', not a generic file-change count. If that count is >= 5, it sets alertlog.xml's lsattr_status to 1 (via the /athinio/bin/updatexml helper binary), logs 'Alert : Immutable attribute changed for N files' to both /var/log/osstatus.log and secOpsOutput_96, writes the matching lines to /athinio/tmp/imm_changes, and logs a per-file alert line for each (parsed from imm_changes' second whitespace-delimited field). If the count is < 5, it sets lsattr_status to 0 and writes only an INFO line to secOpsOutput_96 (not osstatus.log). alertlog.xml is re-locked (chattr +i) at the end either way. This tag was NOT found anywhere in Alert.xml's 41 confirmed tags on a real hierarchy pull -- lsattr_status appears to only exist in alertlog.xml, with no confirmed further roll-up, unlike almost every other attack type in this corpus.",
   "metadata": {
     "attack_type": "immutable_attribute_drift",
-    "status_file": "athinio/system/alertlog.xml",
-    "status_tag": "lsattr_status",
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "athinio/system/alertlog.xml",
+        "read_as": "xml_tag",
+        "tag": "lsattr_status",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "Drift detected -- 5 or more 'container' entries under /home/nas/vdc0/ are missing their immutable attribute (should be locked, currently aren't), logged individually in secOpsOutput_96 and listed in /athinio/tmp/imm_changes."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean -- fewer than 5 'container' entries under /home/nas/vdc0/ are missing their immutable attribute."
+      },
+      {
+        "tier": "verification",
+        "file": [
+          "athinio/system/secOpsOutput_96",
+          "athinio/tmp/imm_changes"
+        ],
+        "read_as": "text",
+        "known_patterns": [],
+        "judgment_allowed": true,
+        "examples": [
+          {
+            "label": "clean (illustrative)",
+            "content": "alertlog.xml:\n<lsattr_status>0</lsattr_status>\n\nsecOpsOutput_96:\nAug 26 03:00:00 2026 : INFO : Immutable attribute Not Changed",
+            "note": "Illustrative per confirmed script logic -- not directly observed on a real hierarchy (this tag was absent from the pulled alertlog.xml)."
+          },
+          {
+            "label": "detected (illustrative)",
+            "content": "alertlog.xml:\n<lsattr_status>1</lsattr_status>\n\nsecOpsOutput_96:\nAug 26 03:00:00 2026 : Alert : Immutable attribute changed for 7 files\nAug 26 03:00:00 2026 : Alert : Immutable attribute changed for /home/nas/vdc0/container_data.img file\n...",
+            "note": "Illustrative based on the confirmed script logic (threshold of 5+ 'container' entries) -- not directly observed."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Evidence file(s) not found; falling back to the tag's own clean status."
+      }
+    ],
     "writer_script": "/athinio/bin/secOpsScript_96 (scans lsattr -aR /home/nas/vdc0/ for 'container' entries missing the immutable bit, threshold: 5+)",
     "ui_feature_name": "Immutable Attribute Drift",
     "confidence": "verified -- writer script's real source read directly (2026-08-28), confirming the earlier QA-doc-sourced description and adding the 'container'-filter detail",
-    "verification_category": "readable_report",
-    "value_schema": {"type": "binary_flag"},
-    "raw_evidence_files": ["athinio/system/secOpsOutput_96", "athinio/tmp/imm_changes"],
-    "value_meanings": {
-      "0": "Clean -- fewer than 5 'container' entries under /home/nas/vdc0/ are missing their immutable attribute.",
-      "1": "Drift detected -- 5 or more 'container' entries under /home/nas/vdc0/ are missing their immutable attribute (should be locked, currently aren't), logged individually in secOpsOutput_96 and listed in /athinio/tmp/imm_changes."
-    },
-    "caveat": "EVIDENCE QUALITY NOTE: secOpsOutput_96's top INFO/Alert summary line ('Immutable attribute changed for N files' / 'Not Changed') is a restated conclusion, same computation as the lsattr_status tag -- not independent evidence on its own. The genuinely independent, checkable detail is the PER-FILE alert lines underneath that summary (each naming a specific file) and the full path list in /athinio/tmp/imm_changes -- an LLM verifying this should weigh those, not the summary line. This is the tag actually meant by 'immutable attribute drift' in the original feature list -- an earlier taxonomy pass had speculatively guessed this mapped to cmd_out.xml's onegrid_rootConf/athgateway_rootConf tags (which are instead the LOCK STATE of the separate rootconf lock/unlock admin action, secOpsScript_52/53 -- a related but functionally different feature: rootconf is an admin action that LOCKS files, while this entry DETECTS DRIFT in files that should already be locked). That earlier guess is confirmed wrong and superseded by this entry. Also unconfirmed: unlike almost every other Alert.xml-adjacent tag checked in this corpus, lsattr_status was not found rolling up into Alert.xml at all on a real hierarchy -- it may only ever live in alertlog.xml, which changes how a customer-facing dashboard could even surface this.",
-    "raw_content_examples": [
-      {"label": "clean (illustrative)", "content": "alertlog.xml:\n<lsattr_status>0</lsattr_status>\n\nsecOpsOutput_96:\nAug 26 03:00:00 2026 : INFO : Immutable attribute Not Changed", "note": "Illustrative per confirmed script logic -- not directly observed on a real hierarchy (this tag was absent from the pulled alertlog.xml)."},
-      {"label": "detected (illustrative)", "content": "alertlog.xml:\n<lsattr_status>1</lsattr_status>\n\nsecOpsOutput_96:\nAug 26 03:00:00 2026 : Alert : Immutable attribute changed for 7 files\nAug 26 03:00:00 2026 : Alert : Immutable attribute changed for /home/nas/vdc0/container_data.img file\n...", "note": "Illustrative based on the confirmed script logic (threshold of 5+ 'container' entries) -- not directly observed."}
-    ]
+    "caveat": "EVIDENCE QUALITY NOTE: secOpsOutput_96's top INFO/Alert summary line ('Immutable attribute changed for N files' / 'Not Changed') is a restated conclusion, same computation as the lsattr_status tag -- not independent evidence on its own. The genuinely independent, checkable detail is the PER-FILE alert lines underneath that summary (each naming a specific file) and the full path list in /athinio/tmp/imm_changes -- an LLM verifying this should weigh those, not the summary line. This is the tag actually meant by 'immutable attribute drift' in the original feature list -- an earlier taxonomy pass had speculatively guessed this mapped to cmd_out.xml's onegrid_rootConf/athgateway_rootConf tags (which are instead the LOCK STATE of the separate rootconf lock/unlock admin action, secOpsScript_52/53 -- a related but functionally different feature: rootconf is an admin action that LOCKS files, while this entry DETECTS DRIFT in files that should already be locked). That earlier guess is confirmed wrong and superseded by this entry. Also unconfirmed: unlike almost every other Alert.xml-adjacent tag checked in this corpus, lsattr_status was not found rolling up into Alert.xml at all on a real hierarchy -- it may only ever live in alertlog.xml, which changes how a customer-facing dashboard could even surface this."
   }
 }

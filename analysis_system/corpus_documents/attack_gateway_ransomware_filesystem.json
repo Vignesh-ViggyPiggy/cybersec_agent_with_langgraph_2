@@ -3,22 +3,26 @@
   "explanation": "File system level (gateway/AMS) ransomware detection -- confirmed via a real product QA test spec (2026-08-27) as a genuinely separate mechanism from both the plain ransomware entry (rChecker/RefCopy) and system binary/library tampering. The /athinio/bin/oneCloudFilerx binary itself detects mass file overwrite/change activity (per the test case: overwriting/changing more than 500 files within a 1-hour window) and updates /athinio/security/config.xml's <RansomDetected> tag to 'YES'. /athinio/bin/gatewayMonitor.sh reads that config.xml and sets /athinio/system/alertlog.xml's <AMS_Ransom_current_status> to 1, which then rolls up directly to Alert.xml's amsrans tag.",
   "metadata": {
     "attack_type": "gateway_ransomware_filesystem",
-    "status_file": "Alert.xml",
-    "status_tag": "amsrans",
+    "evidence_sources": [
+      {
+        "tier": "primary",
+        "file": "Alert.xml",
+        "read_as": "xml_tag",
+        "tag": "amsrans",
+        "known_patterns": [
+          {
+            "value": "1",
+            "detected": true,
+            "meaning": "File-system-level ransomware detected -- more than 500 files were overwritten or changed within a 1-hour window, matching a mass-encryption/mass-corruption pattern rather than an isolated file modification."
+          }
+        ],
+        "default_verdict": "not_detected",
+        "default_meaning": "Clean -- oneCloudFilerx has not observed mass file overwrite/change activity (the documented threshold is >500 files changed within a 1-hour window) since the last reset. Confirmed live on real hierarchy 5/101/1/4/1 (2026-08-27)."
+      }
+    ],
     "writer_script": "/athinio/bin/oneCloudFilerx (mass file-change detection, >500 files/hour) -> /athinio/security/config.xml's RansomDetected -> /athinio/bin/gatewayMonitor.sh -> athinio/system/alertlog.xml's AMS_Ransom_current_status, rolling up to Alert.xml's amsrans",
     "ui_feature_name": "File System Level Ransomware",
     "confidence": "verified -- confirmed against a real product QA test spec; amsrans/AMS_Ransom_current_status both confirmed present and reading 0 (clean) on a real hierarchy",
-    "verification_category": "requires_live_recompute",
-    "value_schema": {"type": "binary_flag"},
-    "raw_evidence_files": ["athinio/system/alertlog.xml"],
-    "value_meanings": {
-      "0": "Clean -- oneCloudFilerx has not observed mass file overwrite/change activity (the documented threshold is >500 files changed within a 1-hour window) since the last reset. Confirmed live on real hierarchy 5/101/1/4/1 (2026-08-27).",
-      "1": "File-system-level ransomware detected -- more than 500 files were overwritten or changed within a 1-hour window, matching a mass-encryption/mass-corruption pattern rather than an isolated file modification."
-    },
-    "caveat": "requires_live_recompute (not diffable/readable-report) because the underlying trigger is a rolling activity-volume threshold inside a compiled binary (oneCloudFilerx), not a static file this workflow can independently re-derive from a snapshot -- verification would require re-running the actual detection, not comparing files. This is distinct from the plain 'ransomware' attack type (Ransom/bin/lib, based on rChecker's RefCopy diff and Alert1.sh's binary/library modification checks) -- oneCloudFilerx's file-count-based mechanism is a separate gateway-specific detector, even though both ultimately mean 'files are being mass-tampered with'.",
-    "raw_content_examples": [
-      {"label": "clean", "content": "<ALERT>\n  <amsrans>0</amsrans>\n</ALERT>", "note": "Confirmed live on real hierarchy 5/101/1/4/1, 2026-08-27."},
-      {"label": "detected (illustrative, per confirmed test case)", "content": "/athinio/security/config.xml:\n<RansomDetected>YES</RansomDetected>\n\n<ALERT>\n  <amsrans>1</amsrans>\n</ALERT>", "note": "Illustrative based on the confirmed test case (overwrite/change >500 files within 1 hour) -- exact config.xml schema not directly observed."}
-    ]
+    "caveat": "requires_live_recompute (not diffable/readable-report) because the underlying trigger is a rolling activity-volume threshold inside a compiled binary (oneCloudFilerx), not a static file this workflow can independently re-derive from a snapshot -- verification would require re-running the actual detection, not comparing files. This is distinct from the plain 'ransomware' attack type (Ransom/bin/lib, based on rChecker's RefCopy diff and Alert1.sh's binary/library modification checks) -- oneCloudFilerx's file-count-based mechanism is a separate gateway-specific detector, even though both ultimately mean 'files are being mass-tampered with'."
   }
 }
