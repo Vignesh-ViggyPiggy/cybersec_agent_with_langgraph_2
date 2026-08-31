@@ -96,31 +96,21 @@ run progresses.
 
 Every attack type — `ransomware`, `user_breach`, `config_drift`, all 23 —
 runs through the exact same compiled LangGraph, just parameterized by that
-attack type's own corpus entry. This is the one graph diagram that applies
-to all of them; §5 covers what's different per attack type.
+attack type's own corpus entry's `evidence_sources` list (see §5.5 in the
+implementation, [EVIDENCE_ENGINE_DESIGN.md](EVIDENCE_ENGINE_DESIGN.md) for
+the design record, [ADDING_ATTACK_TYPES.md](ADDING_ATTACK_TYPES.md) for
+authoring a new one). This is the one graph diagram that applies to all of
+them; §5 covers what's different per attack type.
 
 ```mermaid
 flowchart TD
-    resolve["resolve_attack_files_node\ncorpus lookup: status_file, tag(s),\nvalue_schema, verification_category"] --> routeR{"route_after_resolve\ndata_source_reliable?"}
+    resolve["resolve_attack_node\ncorpus lookup: evidence_sources,\ndata_source_reliable"] --> routeR{"route_after_resolve\ndata_source_reliable?"}
     routeR -->|"no"| cannot_determine["cannot_determine_node"]
-    routeR -->|"yes"| read_status["read_live_status_node\nread the live tag/file"]
-    read_status --> routeS{"route_from_status_check"}
-    routeS -->|"status_file missing"| not_configured["not_configured_node"]
-    routeS -->|"tag(s) triggered"| detected["detected_path_node"]
-    routeS -->|"not triggered,\nreadable_report /\ndiffable_snapshot_files"| verify["verify_against_raw_evidence_node\nLLM checks raw evidence vs 'clean'"]
-    routeS -->|"not triggered,\ncheck_raw_logs"| verify_logs["verify_against_raw_logs_node\ndeterministic regex/phrase match"]
-    routeS -->|"not triggered,\nopaque_binary_only /\nrequires_live_recompute"| unverifiable["unverifiable_path_node"]
-    verify --> routeV{"route_after_verification"}
-    verify_logs --> routeV
-    routeV -->|"contradiction"| discrepancy["discrepancy_node"]
-    routeV -->|"confirmed_clean"| not_detected_clean["not_detected_clean_node"]
-    detected --> attack_info["attack_info_node\nweb search + explain"]
-    discrepancy --> attack_info
-    attack_info --> render["render_markdown_section_node"]
-    not_detected_clean --> render
-    unverifiable --> render
+    routeR -->|"yes"| chain["run_evidence_chain_node\nwalk primary sources (any detected -> detected),\nthen verification sources if all primary clean"]
+    chain -->|"detected / discrepancy"| attack_info["attack_info_node\nweb search + explain"]
+    chain -->|"not_detected / not_detected_unverifiable /\nnot_configured"| render["render_markdown_section_node"]
+    attack_info --> render
     cannot_determine --> render
-    not_configured --> render
     render --> done(["append section to report,\ndiscard this attack's state"])
 ```
 
@@ -130,16 +120,9 @@ The graph assembly itself, in `analysis_system/attack_status_workflow.py`:
 def build_attack_graph():
     workflow = StateGraph(AttackState)
 
-    workflow.add_node("resolve", resolve_attack_files_node)
-    workflow.add_node("read_status", read_live_status_node)
-    workflow.add_node("detected", detected_path_node)
-    workflow.add_node("unverifiable", unverifiable_path_node)
+    workflow.add_node("resolve", resolve_attack_node)
     workflow.add_node("cannot_determine", cannot_determine_node)
-    workflow.add_node("not_configured", not_configured_node)
-    workflow.add_node("verify", verify_against_raw_evidence_node)
-    workflow.add_node("verify_raw_logs", verify_against_raw_logs_node)
-    workflow.add_node("not_detected_clean", not_detected_clean_node)
-    workflow.add_node("discrepancy", discrepancy_node)
+    workflow.add_node("run_chain", run_evidence_chain_node)
     workflow.add_node("attack_info", attack_info_node)
     workflow.add_node("render", render_markdown_section_node)
 
@@ -147,38 +130,30 @@ def build_attack_graph():
 
     workflow.add_conditional_edges("resolve", route_after_resolve, {
         "cannot_determine": "cannot_determine",
-        "read_status": "read_status",
+        "run_chain": "run_chain",
     })
 
-    workflow.add_conditional_edges("read_status", route_from_status_check, {
-        "detected": "detected",
-        "verify": "verify",
-        "verify_raw_logs": "verify_raw_logs",
-        "unverifiable": "unverifiable",
-        "not_configured": "not_configured",
+    workflow.add_conditional_edges("run_chain", route_after_chain, {
+        "attack_info": "attack_info",
+        "render": "render",
     })
 
-    workflow.add_conditional_edges("verify", route_after_verification, {
-        "discrepancy": "discrepancy",
-        "confirmed_clean": "not_detected_clean",
-    })
-
-    workflow.add_conditional_edges("verify_raw_logs", route_after_verification, {
-        "discrepancy": "discrepancy",
-        "confirmed_clean": "not_detected_clean",
-    })
-
-    workflow.add_edge("detected", "attack_info")
-    workflow.add_edge("discrepancy", "attack_info")
     workflow.add_edge("attack_info", "render")
-    workflow.add_edge("not_detected_clean", "render")
-    workflow.add_edge("unverifiable", "render")
     workflow.add_edge("cannot_determine", "render")
-    workflow.add_edge("not_configured", "render")
     workflow.add_edge("render", END)
 
     return workflow.compile()
 ```
+
+Down from 12 nodes to 4 — `run_evidence_chain_node` is one generic engine
+that replaces what used to be four separate node types
+(`read_live_status_node`, `verify_against_raw_evidence_node`,
+`verify_against_raw_logs_node`, plus their routing functions), driven
+entirely by each attack type's own corpus-declared evidence, with no
+per-attack-type Python required for any of it (§5.1 covers the full
+mechanism; this was a real redesign during this project — see
+EVIDENCE_ENGINE_DESIGN.md for why and ADDING_ATTACK_TYPES.md for the
+12 evidence shapes this now covers with zero code).
 
 Six possible `final_status` outcomes come out of this graph:
 `detected`, `discrepancy`, `not_detected`, `not_detected_unverifiable`,
@@ -221,15 +196,15 @@ flowchart TD
 | `athinio/security/malwarefiles.xml`, `athinio/security/dataprotection.xml` | `clam_malware` / `dlp_data_exposure` counts |
 | `var/neridio/banned_ip.xml` | `banned_ip_bruteforce` (presence check) |
 | `athinio/system/user_emptypass_list.xml`, `athinio/system/zero_uid.xml`, `athinio/system/nouser_noowner.xml` | Weak-password / UID-0 / orphaned-file audits |
-| `var/log/secure*`, `rationalVault/log/rationalclient.log*` | `user_breach`'s raw-log check, and `process_anomaly`'s evidence |
-| `home/athinio/data/1cloudFiler/log/gateway.log*` | `gateway_unauthorized_breakin`'s raw-log check |
+| `var/log/secure*`, `rationalVault/log/rationalclient.log*` | `user_breach`'s verification tier, and `process_anomaly`'s evidence |
+| `home/athinio/data/1cloudFiler/log/gateway.log*` | `gateway_unauthorized_breakin`'s verification tier |
 | `var/log/messages`, `var/log/secure`, `var/log/audit.log` | The log-analysis catch-all (§1.3), configurable via `LOG_FILE_PATHS` |
 
 **Local to the analysis machine** (not per-hierarchy):
 
 | File | Used by |
 |---|---|
-| `corpus_documents/attack_*.json` (23 files) + reference-file entries | Ingested into `corpus_db/` by `ingest_corpus.py` — every attack type's `status_file`/`status_tag`/`value_schema`/etc. comes from here, not a flat config file |
+| `corpus_documents/attack_*.json` (23 files) + reference-file entries | Ingested into `corpus_db/` by `ingest_corpus.py` — every attack type's `evidence_sources` list comes from here, not a flat config file |
 | `analysis_system/model/Modelfile` + `cybersecqwen.gguf` | Builds the local Ollama model (see §4.2) |
 | `analysis_system/.env` | `MCP_SERVER_URL`, `LOG_FILE_PATHS`, `LOG_TAIL_LINES`, `CLASSIFICATION_VOTE_COUNT`, `ENABLED_ATTACK_TYPES`, `CORPUS_SERVER_URL` — see `.env.example` |
 | `hierarchy_system/.env` | `ANALYSIS_SERVER_URL`, optional `DATA_ROOT` |
@@ -242,10 +217,11 @@ flowchart TD
 2. That hierarchy's files are pulled from the vault machine over MCP into
    a local working copy.
 3. Every **enabled** attack type (all 23 by default, or a subset via
-   `ENABLED_ATTACK_TYPES`) is checked independently: read its live tag,
-   decide detected/clean/unverifiable/not-configured, optionally verify a
-   "clean" read against raw evidence, explain a "detected" or
-   "discrepancy" result, render one markdown section, append it, discard.
+   `ENABLED_ATTACK_TYPES`) is checked independently: read its live
+   evidence sources, decide detected/clean/unverifiable/not-configured,
+   optionally verify a "clean" read against a verification tier, explain
+   a "detected" or "discrepancy" result, render one markdown section,
+   append it, discard.
 4. A deterministic summary (a regex count over the appended sections'
    status markers) is appended.
 5. The three canonical logs are read from the same local pull and
@@ -373,7 +349,7 @@ sections, then the log-analysis section, then the summary block).
 | `langgraph` | `StateGraph`/`END` — the per-attack graph in `attack_status_workflow.py` |
 | `langchain-core` | `ChatPromptTemplate` — every LLM prompt in both workflows |
 | `langchain-ollama` | `ChatOllama` (the LLM client, `lib/llm_client.py`) and `OllamaEmbeddings` (`corpus_server.py`) |
-| `pydantic` | `BaseModel`/`Field` — every structured-output schema (`EvidenceVerificationResult`, `InitialAnalysisTemplate`, `ExplainerOutputTemplate`, etc.) |
+| `pydantic` | `BaseModel`/`Field` — every structured-output schema (`SourceJudgmentResult`, `InitialAnalysisTemplate`, `ExplainerOutputTemplate`, etc.) |
 | `ddgs` | `DDGS().text(...)` — DuckDuckGo search, used by `attack_info_node` and `_run_ddg_search` |
 | `fastmcp` | `FastMCP`/`Client` — every MCP server (`mcp_server.py`, `trigger_mcp_server.py`, `corpus_server.py`) and client (`mcp_client.py`, `corpus_client.py`, `trigger_mcp_client.py`) |
 | `chromadb` | `PersistentClient` — the attack-corpus vector store (`corpus_db/`) |
@@ -451,60 +427,57 @@ All state is a plain dict matching this `TypedDict`, from
 `analysis_system/attack_status_workflow.py`:
 
 ```python
+class EvidenceSourceResult(TypedDict):
+    file: str
+    tag: NotRequired[str | None]       # the XML tag name, for xml_tag sources -- more specific than `file` alone
+    tier: str                          # "primary" | "verification"
+    existed: bool                      # False if the file (or every rotated/listed file) was missing
+    verdict: str                       # "detected" | "not_detected" | "inconclusive"
+    meaning: str
+    content: NotRequired[str | None]   # raw value/text read, for display
+    matched: NotRequired[str | None]   # which known_pattern matched, if any
+
+
 class AttackState(TypedDict):
     attack_type: str
     hierarchy: str
     vault_root: str
 
-    status_file: str
-    status_tag: str
     meaning: str
     writer_script: str
     ui_feature_name: NotRequired[str | None]
     confidence: str
-    verification_category: str
-    value_schema: NotRequired[dict]
-    raw_evidence_files: NotRequired[list[str]]
+    evidence_sources: list[dict]
     caveat: NotRequired[str]
     data_source_reliable: NotRequired[bool]
-    status_tags: NotRequired[list[str]]  # overrides status_tag when set
 
-    live_value: NotRequired[str | None]
-    tag_values: NotRequired[dict[str, str | None]]
-    triggered_tags: NotRequired[list[str]]
-    status_file_existed: NotRequired[bool]
-    verification_outcome: NotRequired[str | None]   # confirmed_clean | contradiction
-    verification_reasoning: NotRequired[str]
-    final_status: NotRequired[str]                   # detected | not_detected | not_detected_unverifiable | discrepancy | not_configured | cannot_determine
+    primary_results: NotRequired[list[EvidenceSourceResult]]
+    verification_results: NotRequired[list[EvidenceSourceResult]]
+    triggering_results: NotRequired[list[EvidenceSourceResult]]
+    final_status: NotRequired[str]     # detected | not_detected | not_detected_unverifiable | discrepancy | not_configured | cannot_determine
     explainer_text: NotRequired[str]
     corroborating_evidence_text: NotRequired[str]
     markdown_section: NotRequired[str]
 ```
 
-**1. Resolve** — exact-id corpus lookup for this attack type:
+**1. Resolve** — exact-id corpus lookup for this attack type, pulling its
+`evidence_sources` list:
 
 ```python
-def resolve_attack_files_node(state: AttackState) -> AttackState:
+def resolve_attack_node(state: AttackState) -> AttackState:
     entry = get_attack_entry(state["attack_type"])
     metadata = entry["metadata"]
 
     updated = dict(state)
     updated.update({
-        "status_file": metadata["status_file"],
-        "status_tag": metadata["status_tag"],
         "meaning": entry["explanation"],
         "writer_script": metadata.get("writer_script", "unknown"),
         "ui_feature_name": metadata.get("ui_feature_name"),
         "confidence": metadata.get("confidence", "unknown"),
-        "verification_category": metadata["verification_category"],
-        "value_schema": metadata.get("value_schema", {"type": "binary_flag"}),
+        "evidence_sources": metadata.get("evidence_sources", []),
     })
-    if "raw_evidence_files" in metadata:
-        updated["raw_evidence_files"] = metadata["raw_evidence_files"]
     if "caveat" in metadata:
         updated["caveat"] = metadata["caveat"]
-    if "status_tags" in metadata:
-        updated["status_tags"] = metadata["status_tags"]
     updated["data_source_reliable"] = metadata.get("data_source_reliable", True)
     return updated
 ```
@@ -514,216 +487,79 @@ def resolve_attack_files_node(state: AttackState) -> AttackState:
 
 ```python
 def route_after_resolve(state: AttackState) -> str:
-    return "cannot_determine" if not state.get("data_source_reliable", True) else "read_status"
+    return "cannot_determine" if not state.get("data_source_reliable", True) else "run_chain"
 ```
 
-**3. Read live status** — reads the live tag(s)/file according to
-`value_schema["type"]` (§5.2):
+**3. Run the evidence chain** — the generic engine (§5.2/§5.3 explain the
+two pieces this leans on: `known_patterns` matching and the primary/
+verification tier split):
 
 ```python
-def read_live_status_node(state: AttackState) -> AttackState:
-    file_path = _hierarchy_path(state["vault_root"], state["hierarchy"]) / state["status_file"]
-    value_schema = state.get("value_schema") or {"type": "binary_flag"}
+def run_evidence_chain_node(state: AttackState) -> AttackState:
+    sources = state.get("evidence_sources") or []
+    primary_sources = [s for s in sources if s.get("tier", "primary") == "primary"]
+    verification_sources = [s for s in sources if s.get("tier") == "verification"]
 
-    if value_schema.get("type") == "file_contains_pattern":
-        # e.g. config_drift's secOpsOutput_94, rootkit_malware's secOpsOutput_91 --
-        # the whole file's text IS the evidence, not one XML tag.
-        if not file_path.exists():
-            return {**state, "live_value": None, "status_file_existed": False, "triggered_tags": []}
-        content = _read_text_file(file_path, max_chars=8000)[0] or ""
-        triggered = [state["status_tag"]] if _is_detected(content, value_schema) else []
-        return {**state, "live_value": content, "status_file_existed": True, "triggered_tags": triggered}
+    primary_results: list[EvidenceSourceResult] = []
+    for i, source in enumerate(primary_sources):
+        result = _evaluate_source(state, source, "primary")
+        if not result["existed"] and i == 0:
+            # The FIRST primary source's file is genuinely missing -- this
+            # attack type's status can't be determined at all for this
+            # hierarchy (most likely never configured to sync).
+            return {**state, "primary_results": primary_results + [result], "final_status": "not_configured"}
+        primary_results.append(result)
 
-    if value_schema.get("type") == "file_non_empty":
-        # e.g. banned_ip_bruteforce's banned_ip.xml -- presence, not a tag value.
-        if not file_path.exists():
-            return {**state, "live_value": None, "status_file_existed": False, "triggered_tags": []}
-        content = _read_text_file(file_path)[0] or ""
-        live_value = "non_empty" if content.strip() else "empty"
-        triggered = [state["status_tag"]] if _is_detected(live_value, value_schema) else []
-        return {**state, "live_value": live_value, "status_file_existed": True, "triggered_tags": triggered}
+    detected_primaries = [r for r in primary_results if r["verdict"] == "detected"]
+    if detected_primaries:
+        return {**state, "primary_results": primary_results, "triggering_results": detected_primaries,
+                "final_status": "detected"}
 
-    # status_tags (plural) overrides status_tag when an attack type is backed
-    # by more than one related flag in the same file -- detection triggers
-    # on ANY of them.
-    status_tags = state.get("status_tags") or [state["status_tag"]]
-    tag_values, file_existed = _read_xml_tags(file_path, status_tags)
-    if not file_existed:
-        return {**state, "live_value": None, "status_file_existed": False, "triggered_tags": []}
+    verification_results: list[EvidenceSourceResult] = []
+    for source in verification_sources:
+        result = _evaluate_source(state, source, "verification")
+        verification_results.append(result)
+        if result["verdict"] == "detected":
+            return {**state, "primary_results": primary_results, "verification_results": verification_results,
+                    "triggering_results": [result], "final_status": "discrepancy"}
 
-    triggered_tags = [tag for tag, value in tag_values.items() if _is_detected(value, value_schema)]
-    live_value = (
-        tag_values.get(status_tags[0]) if len(status_tags) == 1
-        else ", ".join(f"{tag}={value}" for tag, value in tag_values.items())
-    )
-    return {
-        **state,
-        "live_value": live_value,
-        "tag_values": tag_values,
-        "triggered_tags": triggered_tags,
-        "status_file_existed": True,
-    }
+    verified_clean_count = sum(1 for r in verification_results if r["verdict"] == "not_detected")
+    final_status = "not_detected" if verified_clean_count >= 1 and verification_results and \
+        all(r["verdict"] == "not_detected" for r in verification_results) else "not_detected_unverifiable"
+
+    return {**state, "primary_results": primary_results, "verification_results": verification_results,
+            "final_status": final_status}
+
+
+def route_after_chain(state: AttackState) -> str:
+    return "attack_info" if state["final_status"] in ("detected", "discrepancy") else "render"
 ```
 
-**4. Route** — a missing status file takes priority over everything else
-(usually means the file was never configured to sync from the client to
-the RV server, not "clean"); detected short-circuits; not-detected splits
-further on `verification_category`:
+All primary sources are evaluated even after one reads `detected` (not
+short-circuited) — a multi-tag attack type like `ransomware` (5 co-equal
+tags) needs every triggered one collected, not just the first, so the
+rendered report can say which ones (§5.4's `ransomware` row).
+
+**4. Explain** — only for `detected`/`discrepancy`: reads every evidence
+source's raw content fresh for display, runs 2 web searches, asks the LLM
+for a plain-language explanation + recommended actions:
 
 ```python
-def route_from_status_check(state: AttackState) -> str:
-    if not state.get("status_file_existed", True):
-        return "not_configured"
-    if state.get("triggered_tags"):
-        return "detected"
-    if state["verification_category"] in ("readable_report", "diffable_snapshot_files"):
-        return "verify"
-    if state["verification_category"] == "check_raw_logs" and state["attack_type"] in RAW_LOG_CHECKERS:
-        return "verify_raw_logs"
-    return "unverifiable"
-```
+def _read_corroborating_evidence(state: AttackState) -> str:
+    """Re-reads every evidence source for display -- matches the old
+    behavior of always showing every declared evidence file's content on a
+    detected/discrepancy result, not just whichever one specifically
+    triggered it."""
+    pieces = []
+    for tier_results in (state.get("primary_results") or [], state.get("verification_results") or []):
+        for r in tier_results:
+            if r.get("content"):
+                content = r["content"]
+                display = content if len(content) <= 1500 else content[:1500]
+                pieces.append(f"--- {r['file']} ---\n{display}")
+    return "\n\n".join(pieces)
 
-**5a. Verify (evidence file)** — for `readable_report`/
-`diffable_snapshot_files` types, an LLM checks the live `raw_evidence_files`
-content (plus a labeled corpus reference example, if one exists) against
-the "not detected" claim (system prompt abbreviated below — see source for
-the full text, which also covers shared multi-tag files and
-restated-conclusion evidence):
 
-```python
-def verify_against_raw_evidence_node(state: AttackState) -> AttackState:
-    hierarchy_root = _hierarchy_path(state["vault_root"], state["hierarchy"])
-    evidence_texts = []
-    missing_files = []
-    for rel_path in state.get("raw_evidence_files", []):
-        content, existed = _read_text_file(hierarchy_root / rel_path)
-        if not existed:
-            missing_files.append(rel_path)
-            continue
-        if not content:
-            continue
-        # ... builds a labeled corpus reference block (if one exists for this
-        # file) plus the live content, then hands both to the LLM ...
-        evidence_texts.append(f"--- {rel_path} ---\n=== ACTUAL LIVE CONTENT ===\n{content}\n=== END ===")
-
-    if not evidence_texts:
-        # Expected evidence file(s) missing -- don't guess, say why.
-        reasoning = (
-            f"Raw evidence file(s) not found: {', '.join(missing_files)}. Not configured "
-            f"to sync from the client system, so this could not be independently verified."
-            if missing_files else
-            "Raw evidence file(s) exist but were unreadable; falling back to the tag's status."
-        )
-        return {**state, "verification_outcome": "confirmed_clean", "verification_reasoning": reasoning}
-
-    combined_evidence = "\n\n".join(evidence_texts)
-    # system prompt (abbreviated): "You are a cybersecurity analyst double-
-    # checking a 'not detected' status ... Only flag a contradiction if the
-    # evidence clearly shows the attack occurred ... Only flag a
-    # contradiction if evidence SPECIFIC TO THIS ATTACK TYPE disagrees ...
-    # a restated pass/fail verdict is corroboration, not independent
-    # evidence, give it little weight ..."
-    template = ChatPromptTemplate.from_messages([
-        ("system", "..."),
-        ("user", "Attack type: {attack_type}\nWhat this status normally means: {meaning}\n\n"
-                  "Raw evidence:\n{evidence}\n\nDoes this evidence confirm the system is clean, "
-                  "or contradict the 'not detected' status?")
-    ])
-    try:
-        structured_model = model.with_structured_output(EvidenceVerificationResult)
-        result = (template | structured_model).invoke({
-            "attack_type": state["attack_type"], "meaning": state["meaning"], "evidence": combined_evidence,
-        })
-        return {**state, "verification_outcome": result.outcome, "verification_reasoning": result.reasoning}
-    except Exception as e:
-        return {**state, "verification_outcome": "confirmed_clean",
-                "verification_reasoning": f"Verification pass failed ({e}); falling back to the tag's own status."}
-```
-
-`EvidenceVerificationResult` (the structured-output schema for step 5a):
-
-```python
-class EvidenceVerificationResult(BaseModel):
-    outcome: Literal["confirmed_clean", "contradiction"] = Field(
-        description="confirmed_clean if the raw evidence supports the 'not detected' "
-                    "status; contradiction if the evidence suggests the attack may "
-                    "actually have occurred despite the tag saying otherwise."
-    )
-    reasoning: str = Field(description="1-3 sentence justification citing what was found in the evidence.")
-```
-
-**5b. Verify (raw logs)** — for `check_raw_logs` types (`user_breach`,
-`gateway_unauthorized_breakin`), a **deterministic** regex/phrase match —
-no LLM judgment call:
-
-```python
-RAW_LOG_FILE_PATTERNS: dict[str, list[str]] = {
-    "user_breach": ["var/log/secure*", "rationalVault/log/rationalclient.log*"],
-    "gateway_unauthorized_breakin": ["home/athinio/data/1cloudFiler/log/gateway.log*"],
-}
-
-def _check_user_breach_raw_logs(log_text: str) -> tuple[bool, str]:
-    fails = SSHD_FAIL_RE.findall(log_text)
-    accepts = SSHD_ACCEPT_RE.findall(log_text)
-    fail_ips = {ip for _, ip in fails}
-    for user, ip in accepts:
-        if ip in fail_ips:
-            return True, (
-                f"Found failed password attempts from {ip} followed by a successful "
-                f"password login for '{user}' from that same address."
-            )
-    return False, "No failed-then-accepted-password sequence from the same source address found."
-
-def _check_gateway_breakin_raw_logs(log_text: str) -> tuple[bool, str]:
-    matches = [line for line in log_text.splitlines() if "Break-in Attempt" in line]
-    if matches:
-        return True, f"Found {len(matches)} line(s) containing 'Break-in Attempt', e.g.: {matches[0].strip()}"
-    return False, "No 'Break-in Attempt' lines found in the available gateway.log content."
-
-RAW_LOG_CHECKERS = {
-    "user_breach": _check_user_breach_raw_logs,
-    "gateway_unauthorized_breakin": _check_gateway_breakin_raw_logs,
-}
-
-def verify_against_raw_logs_node(state: AttackState) -> AttackState:
-    hierarchy_root = _hierarchy_path(state["vault_root"], state["hierarchy"])
-    checker = RAW_LOG_CHECKERS[state["attack_type"]]
-
-    combined_text_parts, missing_patterns = [], []
-    for pattern in RAW_LOG_FILE_PATTERNS.get(state["attack_type"], []):
-        matches = sorted(hierarchy_root.glob(pattern))   # glob, not exact name -- these logs rotate
-        if not matches:
-            missing_patterns.append(pattern)
-            continue
-        for match_path in matches:
-            content, existed = _read_text_file(match_path, max_chars=20000)
-            if existed and content:
-                combined_text_parts.append(content)
-
-    if not combined_text_parts:
-        reasoning = (
-            f"Raw log file(s) not found (patterns tried: {', '.join(missing_patterns)})."
-            if missing_patterns else "Raw log files exist but were unreadable."
-        )
-        return {**state, "verification_outcome": "confirmed_clean", "verification_reasoning": reasoning}
-
-    found, reasoning = checker("\n".join(combined_text_parts))
-    return {**state, "verification_outcome": "contradiction" if found else "confirmed_clean",
-            "verification_reasoning": reasoning}
-```
-
-Both 5a and 5b converge on the same routing:
-
-```python
-def route_after_verification(state: AttackState) -> str:
-    return "discrepancy" if state.get("verification_outcome") == "contradiction" else "confirmed_clean"
-```
-
-**6. Explain** — only for `detected`/`discrepancy`: reads corroborating
-evidence fresh, runs 2 web searches, asks the LLM for a plain-language
-explanation + recommended actions:
-
-```python
 def attack_info_node(state: AttackState) -> AttackState:
     attack_type = state["attack_type"]
     corroborating_evidence_text = _read_corroborating_evidence(state)
@@ -742,10 +578,11 @@ def attack_info_node(state: AttackState) -> AttackState:
             snippets.append(f"- (search failed for '{query}': {e})")
 
     template = ChatPromptTemplate.from_messages([
-        ("system", "You are a cybersecurity analyst writing a short, plain-language "
-                   "explanation for a customer dashboard. Given search snippets about an "
-                   "attack type, write: (1) a 2-3 sentence explanation of what this "
-                   "attack is, and (2) 3-5 concrete recommended actions, as a bullet list."),
+        ("system",
+         "You are a cybersecurity analyst writing a short, plain-language "
+         "explanation for a customer dashboard. Given search snippets about an "
+         "attack type, write: (1) a 2-3 sentence explanation of what this "
+         "attack is, and (2) 3-5 concrete recommended actions, as a bullet list."),
         ("user", "Attack type: {attack_type}\n\nSearch results:\n{snippets}")
     ])
     try:
@@ -760,170 +597,290 @@ def attack_info_node(state: AttackState) -> AttackState:
     return {**state, "explainer_text": str(explainer_text), "corroborating_evidence_text": corroborating_evidence_text}
 ```
 
-**7. Render** — builds the markdown section: status, provenance chain,
-triggered tag(s), evidence, explanation:
+**5. Render** — builds the markdown section: status, provenance chain,
+triggering evidence, corroborating evidence, explanation:
 
 ```python
-def _format_provenance_chain(writer_script: str, status_file: str, tags_display: str) -> str:
-    """writer_script is an arrow-delimited chain (" -> ") wherever a real
-    multi-hop provenance was confirmed from source, e.g. "oneCloudFilerx ->
-    config.xml's RansomDetected -> gatewayMonitor.sh -> alertlog.xml's
-    AMS_Ransom_current_status" -- rendered as numbered hops."""
+def _format_provenance_chain(writer_script: str, files_checked: str) -> str:
     hops = [h.strip() for h in writer_script.split(" -> ") if h.strip()] or [writer_script]
     lines = [f"{i}. {hop}" for i, hop in enumerate(hops, start=1)]
-    lines.append(f"{len(hops) + 1}. **`{status_file}` -> `{tags_display}`** *(this workflow reads here)*")
+    lines.append(f"{len(hops) + 1}. **`{files_checked}`** *(this workflow reads here)*")
     return "\n".join(lines)
+
 
 def render_markdown_section_node(state: AttackState) -> AttackState:
     attack_label = state["attack_type"].replace("_", " ").title()
     final_status = state["final_status"]
-    # not_detected_unverifiable displays as plain "NOT DETECTED" -- the
-    # unverifiable/verified distinction is conveyed by whether evidence
-    # appears below, not a separate status word.
     display_status = "not_detected" if final_status == "not_detected_unverifiable" else final_status
+
+    def _label(r: EvidenceSourceResult) -> str:
+        """The tag name is more specific than the file when the source is
+        an xml_tag read -- e.g. ransomware's 5 tags all live in Alert.xml,
+        so naming the file alone can't distinguish which one triggered."""
+        return r["tag"] if r.get("tag") else r["file"]
+
+    sources = state.get("evidence_sources") or []
+    all_results = (state.get("primary_results") or []) + (state.get("verification_results") or [])
+    files_checked = ", ".join(dict.fromkeys(r["file"] for r in all_results)) or "(none read)"
+    labels_checked = ", ".join(dict.fromkeys(_label(r) for r in all_results)) or "(none read)"
 
     lines = [f"## {attack_label}", "", f"<!-- {STATUS_MARKER}: {final_status} -->"]
     lines.append(f"**Status:** {display_status.replace('_', ' ').upper()}")
-    status_tags = state.get("status_tags") or [state["status_tag"]]
-    tags_display = ", ".join(status_tags)
-    lines.append(f"\n**Source chain:**\n{_format_provenance_chain(state['writer_script'], state['status_file'], tags_display)}")
+    lines.append(f"\n**Source chain:**\n{_format_provenance_chain(state['writer_script'], files_checked)}")
 
     if final_status == "detected":
-        triggered = state.get("triggered_tags") or status_tags
-        if len(status_tags) > 1:
-            lines.append(f"\n**Triggered tag(s):** `{', '.join(triggered)}` (out of `{', '.join(status_tags)}` checked)")
+        triggering = state.get("triggering_results") or []
+        if len(triggering) > 1 or (state.get("primary_results") and len(state["primary_results"]) > 1):
+            triggered_labels = ", ".join(_label(r) for r in triggering)
+            lines.append(f"\n**Triggering evidence:** `{triggered_labels}` (out of `{labels_checked}` checked)")
+        elif triggering:
+            lines.append(f"\n**Triggering evidence:** `{_label(triggering[0])}` — {triggering[0]['meaning']}")
         lines.append(f"\n{state['meaning']}")
         if state.get("corroborating_evidence_text"):
             lines.append(f"\n### Corroborating raw evidence\n\n```\n{state['corroborating_evidence_text']}\n```")
         lines.append(f"\n### What this attack is / recommended actions\n\n{state.get('explainer_text', '')}")
 
     elif final_status == "discrepancy":
-        lines.append(f"\n⚠ The status tag says 'not detected', but independent review of the raw "
-                      f"evidence disagreed: {state.get('verification_reasoning', '')}")
+        triggering = (state.get("triggering_results") or [{}])[0]
+        lines.append(
+            f"\n⚠ The status tag says 'not detected', but independent review of `{_label(triggering) if triggering else '?'}` "
+            f"disagreed: {triggering.get('meaning', '')}"
+        )
         feature_ref = state.get("ui_feature_name") or f"the feature that manages `{state['writer_script']}`"
-        lines.append(f"\n**Recommended:** re-run **{feature_ref}** from the dashboard for an "
-                      f"authoritative fresh determination.")
+        lines.append(f"\n**Recommended:** re-run **{feature_ref}** from the dashboard for an authoritative fresh determination.")
         if state.get("corroborating_evidence_text"):
             lines.append(f"\n### Corroborating raw evidence\n\n```\n{state['corroborating_evidence_text']}\n```")
         lines.append(f"\n### What this attack is / recommended actions\n\n{state.get('explainer_text', '')}")
 
     elif final_status == "not_detected":
-        lines.append(f"\n✅ Not detected. Verified against raw evidence: {state.get('verification_reasoning', '')}")
-        if state.get("corroborating_evidence_text"):
-            lines.append(f"\n### Raw evidence checked\n\n```\n{state['corroborating_evidence_text']}\n```")
+        lines.append(f"\n✅ Not detected. Verified clean across {len(all_results)} evidence source(s): {files_checked}.")
 
     elif final_status == "not_detected_unverifiable":
-        live_value_display = state.get("live_value")
+        primary_results = state.get("primary_results") or []
+        live_value_display = primary_results[0].get("content") if primary_results else None
         value_line = (f"currently reads:\n\n```\n{live_value_display}\n```"
                        if live_value_display and "\n" in str(live_value_display)
                        else f"currently reads `{live_value_display}`.")
-        lines.append(f"\n✅ Not detected -- `{state['status_file']}` -> `{tags_display}` {value_line}\n\n"
-                      f"No independent evidence exists for this attack type, so this reading could not be "
-                      f"cross-checked against anything else.")
+        lines.append(
+            f"\n✅ Not detected -- `{files_checked}` {value_line}\n\n"
+            f"No further evidence source was conclusive, so this reading could not be "
+            f"cross-checked against anything else."
+        )
         lines.append(f"\n**What determines this status:**\n\n{state.get('meaning', '')}")
 
     elif final_status == "not_configured":
-        vault_display = f"rationalVault/data/{state['hierarchy']}/{state['status_file']}"
-        lines.append(f"\n❓ **File not configured for this system.** `{state['status_file']}` was not "
-                      f"found at `{vault_display}`. This is not the same as a clean result.")
+        first_file = sources[0]["file"] if sources else "?"
+        first_file_display = ", ".join(first_file) if isinstance(first_file, list) else first_file
+        vault_display = f"rationalVault/data/{state['hierarchy']}/{first_file_display}"
+        lines.append(
+            f"\n❓ **File not configured for this system.** `{first_file_display}` was not "
+            f"found at `{vault_display}`. This is not the same as a clean result."
+        )
 
     else:  # cannot_determine
-        lines.append("\n⛔ **Cannot determine.** The data source for this attack type is known "
-                      "to be unreliable independent of its current value -- do not treat this as "
-                      "either detected or clean.")
+        lines.append(
+            "\n⛔ **Cannot determine.** The data source for this attack type is known "
+            "to be unreliable independent of its current value -- do not treat this as "
+            "either detected or clean."
+        )
 
     return {**state, "markdown_section": "\n".join(lines) + "\n"}
 ```
 
-### 5.2 `value_schema` types — how a raw tag value becomes detected/clean
+### 5.2 `known_patterns` — how a raw value becomes detected/clean
+
+Every evidence source resolves through the same functions, regardless of
+whether it's an XML tag, a text/log pattern scan, or a rotating log:
 
 ```python
-def _is_detected(live_value: str | None, value_schema: dict | None) -> bool:
-    if live_value is None:
-        return False
-    schema = value_schema or {"type": "binary_flag"}
-    schema_type = schema.get("type", "binary_flag")
+def _read_evidence_source(vault_root: str, hierarchy: str, source: dict) -> tuple[str | None, bool]:
+    """`file` may be a single path or a list -- every listed path (glob-
+    expanded if rotates=true) is read and combined into ONE blob before
+    matching, not judged file-by-file. This matters for a correlation
+    pattern that needs two files together (user_breach's sshd signal spans
+    var/log/secure and rationalclient.log), and for a multi-file judgment
+    where one file alone is ambiguous but its sibling gives it context."""
+    hierarchy_root = _hierarchy_path(vault_root, hierarchy)
+    files = source["file"] if isinstance(source["file"], list) else [source["file"]]
 
-    if schema_type == "binary_flag":
-        return live_value == "1"
-    if schema_type in ("string_pattern", "file_contains_pattern"):
-        pattern = schema.get("detected_regex", "")
-        return bool(pattern) and re.search(pattern, live_value) is not None
-    if schema_type == "raw_value_needs_baseline_diff":
-        # The tag itself is a raw timestamp/permission value, never a flag --
-        # always False here so the graph proceeds to verification, where the
-        # actual baseline diff is what determines drift.
-        return False
-    if schema_type == "count_greater_than_zero":
-        try:
-            return int(live_value) > 0
-        except (TypeError, ValueError):
-            return False
-    if schema_type == "file_non_empty":
-        return live_value == "non_empty"
+    if source.get("read_as") == "xml_tag":
+        file_path = hierarchy_root / files[0]
+        values, existed = _read_xml_tags(file_path, [source["tag"]])
+        return (values.get(source["tag"]) if existed else None), existed
 
-    raise ValueError(f"Unknown value_schema type: {schema_type!r}")
+    parts: list[str] = []
+    any_existed = False
+    multi = len(files) > 1 or source.get("rotates")
+    for f in files:
+        paths = sorted(hierarchy_root.glob(f + "*")) if source.get("rotates") else [hierarchy_root / f]
+        for p in paths:
+            content, existed = _read_text_file(p, max_chars=20000 if source.get("rotates") else 8000)
+            if existed:
+                any_existed = True
+            if existed and content:
+                parts.append(f"--- {p.relative_to(hierarchy_root)} ---\n{content}" if multi else content)
+    return ("\n\n".join(parts) if parts else ""), any_existed
+
+
+def _match_known_patterns(value: str | None, known_patterns: list[dict]) -> tuple[str, str, str | None] | None:
+    """Tries each known_patterns entry in declared order; returns the
+    first match, or None."""
+    if value is None:
+        return None
+    for kp in known_patterns:
+        if "value" in kp:
+            if value == kp["value"]:
+                return ("detected" if kp["detected"] else "not_detected", kp.get("meaning", ""), kp["value"])
+        elif "min_value" in kp:
+            try:
+                if int(value) >= kp["min_value"]:
+                    return ("detected" if kp["detected"] else "not_detected", kp.get("meaning", ""), f">= {kp['min_value']}")
+            except (TypeError, ValueError):
+                continue
+        elif "non_empty" in kp:
+            if bool(value.strip()) == bool(kp["non_empty"]):
+                return ("detected" if kp["detected"] else "not_detected", kp.get("meaning", ""), "non_empty")
+        elif "pattern" in kp:
+            flags = 0
+            for flag_name in kp.get("flags", []):
+                flags |= getattr(re, flag_name)
+            if re.search(kp["pattern"], value, flags):
+                return ("detected" if kp["detected"] else "not_detected", kp.get("meaning", ""), kp["pattern"])
+    return None
+
+
+def _judge_source_with_llm(attack_type: str, meaning: str, content: str, examples: list[dict]) -> tuple[str, str]:
+    """LLM fallback for a source with judgment_allowed=true whose
+    known_patterns didn't match anything, grounded by the source's own
+    labeled examples."""
+    example_lines = "\n".join(
+        f"  [{ex.get('label', '?')}] {ex.get('content', '')}\n    ({ex.get('note', '')})"
+        for ex in (examples or [])
+    ) or "(none provided)"
+    template = ChatPromptTemplate.from_messages([
+        ("system",
+         "You are a cybersecurity analyst judging one piece of evidence for one specific attack type. "
+         "Decide whether this evidence clearly shows the attack occurred (detected), clearly supports a "
+         "clean result (not_detected), or is genuinely inconclusive either way. Labeled examples below are "
+         "illustrative reference only -- base your judgment ONLY on the actual live content given."),
+        ("user",
+         "Attack type: {attack_type}\nWhat this status normally means: {meaning}\n\n"
+         "Illustrative examples (not real findings):\n{examples}\n\n"
+         "ACTUAL LIVE CONTENT:\n{content}\n\ndetected, not_detected, or inconclusive?")
+    ])
+    try:
+        structured_model = model.with_structured_output(SourceJudgmentResult)
+        result = (template | structured_model).invoke({
+            "attack_type": attack_type, "meaning": meaning, "examples": example_lines, "content": content,
+        })
+        return result.verdict, result.reasoning
+    except Exception as e:
+        return "inconclusive", f"Judgment pass failed ({e}); treated as inconclusive."
+
+
+def _evaluate_source(state: AttackState, source: dict, tier: str) -> EvidenceSourceResult:
+    """Pattern match first (free, deterministic) -> default_verdict if the
+    source declares one and nothing matched (this is what makes a plain
+    text-pattern scan resolve definitively, and what makes a MISSING
+    evidence file default to a specific verdict instead of hanging as
+    unresolved) -> an LLM judgment if judgment_allowed -> inconclusive."""
+    value, existed = _read_evidence_source(state["vault_root"], state["hierarchy"], source)
+    file_display = ", ".join(source["file"]) if isinstance(source["file"], list) else source["file"]
+    base: EvidenceSourceResult = {"file": file_display, "tag": source.get("tag"), "tier": tier, "existed": existed}
+
+    if not existed:
+        if "default_verdict" in source:
+            return {**base, "verdict": source["default_verdict"],
+                    "meaning": source.get("default_meaning", "") + " (Evidence file not found.)", "content": None}
+        return {**base, "verdict": "inconclusive", "meaning": "File not found.", "content": None}
+
+    matched = _match_known_patterns(value, source.get("known_patterns", []))
+    if matched:
+        verdict, meaning, matched_repr = matched
+        return {**base, "verdict": verdict, "meaning": meaning, "content": value, "matched": matched_repr}
+
+    if source.get("judgment_allowed") and value:
+        verdict, meaning = _judge_source_with_llm(state["attack_type"], state["meaning"], value, source.get("examples", []))
+        return {**base, "verdict": verdict, "meaning": meaning, "content": value}
+
+    if "default_verdict" in source:
+        return {**base, "verdict": source["default_verdict"], "meaning": source.get("default_meaning", ""), "content": value}
+
+    return {**base, "verdict": "inconclusive", "meaning": "No known pattern matched; no default or judgment configured.", "content": value}
 ```
 
-| `type` | Meaning | Used by |
+| `known_patterns` key | Meaning | Example |
 |---|---|---|
-| `binary_flag` | `live_value == "1"` | Most attack types (the default) |
-| `count_greater_than_zero` | `int(live_value) > 0` | `clam_malware`, `dlp_data_exposure`, `weak_password_accounts`, `unauthorized_uid0_account`, `orphaned_files` — types where *any* nonzero count is inherently bad |
-| `file_contains_pattern` | Regex search over the **whole raw file's text**, not one XML tag | `config_drift` (`Tampered`), `rootkit_malware` (`Warning:`) — attack types whose real output is a plain-text scan, not a tag |
-| `file_non_empty` | File has any content at all | `banned_ip_bruteforce` — fail2ban's `banned_ip.xml` is checked for presence, not a value |
-| `raw_value_needs_baseline_diff` | Always `False` here; verification is the real check | Not currently used by any attack type in this corpus, but supported |
+| `value` | Exact string equality | `{"value": "1", "detected": true}` — a binary tag read |
+| `min_value` | `int(value) >= N` | `{"min_value": 1, "detected": true}` — a count-style tag (any nonzero is a finding) |
+| `non_empty` | Value has any non-whitespace content | `{"non_empty": true, "detected": true}` — a presence-only check (`banned_ip_bruteforce`) |
+| `pattern` | Regex search — supports named groups + backreferences | `{"pattern": "Failed password.*?from (?P<ip>...).*?Accepted password.*?from (?P=ip)", "flags": ["DOTALL"], "detected": true}` — `user_breach`'s cross-line IP correlation |
 
-### 5.3 `verification_category` — what happens when the tag says "clean"
+`default_verdict`/`default_meaning` on a source is what makes "nothing
+matched" resolve to a definite answer instead of `inconclusive` — used
+both when a value doesn't match any declared pattern (e.g. a
+text-scan-style source where absence of the pattern means clean) and when
+the evidence file is missing entirely (matching the old
+`verify_against_raw_evidence_node`'s explicit fallback: an unsynced
+evidence file falls back to the tag's own clean status, not a red flag).
 
-| Category | Behavior | Used by |
-|---|---|---|
-| `readable_report` / `diffable_snapshot_files` | LLM verification against `raw_evidence_files` (§5.1 step 5a) | `immutable_attribute_drift`, `special_folder_monitoring`, `unknown_binary_detection` |
-| `check_raw_logs` | Deterministic regex/phrase match (§5.1 step 5b) | `user_breach`, `gateway_unauthorized_breakin` |
-| `requires_live_recompute` | No verification attempted — the real trigger is inside a compiled binary or needs a dynamically-named file this workflow can't locate; reported as `not_detected_unverifiable` | `ransomware`, `process_anomaly`, `gateway_breach_activity`, `gateway_ransomware_filesystem`, `gateway_ransomware_backup` |
-| `opaque_binary_only` | Same as above — no raw evidence confirmed to exist at all | The remaining ~14 types (all the `count_greater_than_zero` types, `honeypot`, `secure_vault_ransomware`, `security_config`, `unauthorized_ddl`, `log_disable`, `banned_ip_bruteforce`) |
+### 5.3 Primary vs. verification tiers — what happens when the tag says "clean"
+
+`run_evidence_chain_node` (§5.1) splits `evidence_sources` into two
+tiers by each source's own `"tier"` field:
+
+| Tier | Behavior |
+|---|---|
+| `primary` (default if unset) | The live status read(s). **All** primary sources are evaluated, and *any* reading `detected` makes the whole attack type `detected` — this is how a multi-tag attack type (`ransomware`'s 5 tags, `unauthorized_ddl`'s 4) is expressed: several co-equal primary sources, not one primary plus special-cased siblings. |
+| `verification` | Only reached once **every** primary source reads clean. Walked in order; the first one to read `detected` makes the result `discrepancy` (tag said clean, evidence disagreed). |
+
+What comes out, by how many/which sources actually resolved:
+
+| Outcome | When |
+|---|---|
+| `not_configured` | The very first primary source's file doesn't exist at all — this attack type's status can't be determined for this hierarchy (most likely never configured to sync from the client) |
+| `cannot_determine` | `data_source_reliable: false` on the corpus entry — short-circuits before any source is even read (only `secure_vault_ransomware` today) |
+| `detected` | Any primary source read `detected` |
+| `discrepancy` | Every primary source read clean, but a verification-tier source read `detected` |
+| `not_detected` | Every primary source read clean, **and** at least one verification source was configured and every configured verification source also read clean — genuinely verified |
+| `not_detected_unverifiable` | Every primary source read clean, but no verification tier is configured (or none was conclusive) — unverified, not treated as suspicious |
+
+An attack type with only primary sources and no verification tier at all
+can only ever land on `detected`, `not_detected_unverifiable`,
+`not_configured`, or `cannot_determine` — `not_detected` (verified) and
+`discrepancy` both require a verification tier to exist.
 
 ### 5.4 Per-attack-type reference
 
-Sourced from `corpus_documents/attack_*.json`. `Multi-tag` means
-`status_tags` (plural) is set — detection triggers on *any* of the listed
-tags, computed once in `read_live_status_node`, not re-derived per tag.
+Sourced from `corpus_documents/attack_*.json`'s `evidence_sources`.
+`(N sources)` means several co-equal primary tags — any one triggers
+`detected` (§5.3).
 
-**On the "Verified against" column**: only `readable_report`/
-`diffable_snapshot_files` and `check_raw_logs` types ever actually get a
-"not detected" reading independently checked (§5.1 steps 5a/5b) — that
-column names the exact file(s) that check reads. A `raw_evidence_files`
-entry in an attack type's corpus metadata does **not** always mean
-verification happens: for `requires_live_recompute` and `opaque_binary_only`
-types, any listed evidence file is only read afterwards, to show as
-corroborating detail *if* the tag is ever found `detected` — a clean read
-from one of those types is never cross-checked against anything, which is
-exactly what "unverifiable" in their status means.
-
-| Attack type | Status file | Tag(s) | Schema | Verification | Verified against | Notes |
-|---|---|---|---|---|---|---|
-| `ransomware` | `Alert.xml` | `Ransom`, `bin`, `lib`, `honeypot`, `Process` (multi-tag) | binary_flag | requires_live_recompute | *(none — not verified)* | Any 1 of 5 = detected — deliberately stricter than the product's own internal 2-of-4 combined-score threshold |
-| `process_anomaly` | `Alert.xml` | `Process` | binary_flag | requires_live_recompute | *(none — not verified; `rationalclient.log`/`osstatus.log` only shown if detected)* | Real threshold: current process count > 1.5x a 7-day running average (not a fixed "~50") |
-| `rootkit_malware` | `athinio/system/secOpsOutput_91` | N/A — text scan for `Warning:` | file_contains_pattern | opaque_binary_only | *(none — the scan of `secOpsOutput_91` IS the live read itself)* | rkhunter's own `--report-warnings-only` output; sets no XML tag anywhere |
-| `unknown_binary_detection` | `Alert.xml` | `unknown_binary` | binary_flag | readable_report | `athinio/system/secOpsOutput_112` | Split out of `rootkit_malware`; `/proc/$pid/exe` enumeration against a 2-week learning-period baseline |
-| `config_drift` | `athinio/system/secOpsOutput_94` | N/A — text scan for `Tampered` | file_contains_pattern | opaque_binary_only | *(none — the scan of `secOpsOutput_94` IS the live read itself)* | 24h grace window on new changes, 24h self-clearing auto-expiry |
-| `security_config` | `Alert.xml` | `security_config` | binary_flag | opaque_binary_only | *(none — no evidence file confirmed)* | No confirmed writer script in the bundle |
-| `user_breach` | `athinio/system/alertlog.xml` | `User_breach`, `suspicious_user_login` (multi-tag) | binary_flag | check_raw_logs | `var/log/secure*`, `rationalVault/log/rationalclient.log*` (deterministic sshd fail→accept regex) | Real 2-stage detector (14-day baseline + 30-min failed-attempt escalation); the raw-log check here is a simpler approximate heuristic |
-| `gateway_unauthorized_breakin` | `Alert.xml` | `break-in` | binary_flag | check_raw_logs | `home/athinio/data/1cloudFiler/log/gateway.log*` (deterministic `"Break-in Attempt"` phrase match) | Genuinely gateway/filer-specific, not an SSH pattern |
-| `gateway_breach_activity` | `Alert.xml` | `breachval` | binary_flag | requires_live_recompute | *(none — not verified; `secOpsOutput_105`/`breach.xml` only shown if detected)* | 7-day per-worker baseline, alerts at >=2x that baseline |
-| `gateway_ransomware_filesystem` | `Alert.xml` | `amsrans` | binary_flag | requires_live_recompute | *(none — not verified; `alertlog.xml` only shown if detected)* | `oneCloudFilerx`: >500 files changed within 1 hour |
-| `gateway_ransomware_backup` | `Alert.xml` | `tier_ran` | binary_flag | requires_live_recompute | *(none — not verified; `alertlog.xml` only shown if detected)* | Same class of check, scoped to the backup/tiered-storage path only |
-| `honeypot` | `Alert.xml` | `honeypot` | binary_flag | opaque_binary_only | *(none — not verified; `alertlog.xml` only shown if detected)* | Decoy-directory content diff |
-| `special_folder_monitoring` | `Alert.xml` | `special_files_honeypot` | binary_flag | readable_report | `athinio/system/secOpsOutput_128` | Per-admin-configured-folder honeypot/immutability/activity checks |
-| `immutable_attribute_drift` | `athinio/system/alertlog.xml` | `lsattr_status` | binary_flag | readable_report | `athinio/system/secOpsOutput_96`, `athinio/tmp/imm_changes` | `container`-named entries under `/home/nas/vdc0/` missing `chattr +i`, threshold 5+; does not roll up to `Alert.xml` |
-| `secure_vault_ransomware` | `athinio/system/alertlog.xml` | `SV_Ransom_current_status` | binary_flag | opaque_binary_only | *(none — never reached)* | `data_source_reliable: false` short-circuits straight to `cannot_determine` before any file is even read |
-| `clam_malware` | `athinio/security/malwarefiles.xml` | `nooffile` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | Per-file ClamAV scan markers, aggregated by a compiled binary |
-| `dlp_data_exposure` | `athinio/security/dataprotection.xml` | `nooffile` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | Same pattern as `clam_malware`; the underlying XML-write code is confirmed commented out in the deployed scanner, so a clean 0 may reflect a broken pipeline rather than "no findings" |
-| `banned_ip_bruteforce` | `var/neridio/banned_ip.xml` | N/A — file-presence check | file_non_empty | opaque_binary_only | *(none — the status file itself is the evidence)* | fail2ban's own ban list |
-| `weak_password_accounts` | `athinio/system/user_emptypass_list.xml` | `NoOfAccounts` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | `/etc/shadow` empty-password scan |
-| `unauthorized_uid0_account` | `athinio/system/zero_uid.xml` | `NoOfExtraAccounts` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | `/etc/passwd` UID-0 scan; a confirmed real product bug writes the clean-state result to `weak_password_accounts`'s file instead of this one |
-| `orphaned_files` | `athinio/system/nouser_noowner.xml` | `NoOfFiles` | count_greater_than_zero | opaque_binary_only | *(none — no evidence file confirmed)* | `find -nouser -o -nogroup` |
-| `unauthorized_ddl` | `Alert.xml` | `drop_table`, `create_table`, `alter_table`, `truncate_table` (multi-tag) | binary_flag | opaque_binary_only | *(none — no evidence file confirmed)* | No confirmed writer script in the bundle |
-| `log_disable` | `Alert.xml` | `log_disable` | binary_flag | opaque_binary_only | *(none — no evidence file confirmed)* | No confirmed writer script in the bundle |
+| Attack type | Primary tier | Verification tier | Notes |
+|---|---|---|---|
+| `ransomware` | `Alert.xml#Ransom`, `#bin`, `#lib`, `#honeypot`, `#Process` (5 sources) | *(none)* | Any 1 of 5 = detected — deliberately stricter than the product's own internal 2-of-4 combined-score threshold |
+| `process_anomaly` | `Alert.xml#Process` | *(none)* | Real threshold: process count > 1.5x a 7-day running average |
+| `rootkit_malware` | `athinio/system/secOpsOutput_91` (text scan: `Warning:`) | *(none)* | No tag at all — the primary source itself is the scan |
+| `unknown_binary_detection` | `Alert.xml#unknown_binary` | `athinio/system/secOpsOutput_112` (judgment) | Split out of `rootkit_malware`; `/proc/$pid/exe` enumeration vs. a 2-week baseline |
+| `config_drift` | `athinio/system/secOpsOutput_94` (text scan: `Tampered`) | *(none)* | 24h grace window, 24h self-clearing auto-expiry |
+| `security_config` | `Alert.xml#security_config` | *(none)* | No confirmed writer script |
+| `user_breach` | `athinio/system/alertlog.xml#User_breach`, `#suspicious_user_login` (2 sources) | `var/log/secure` + `rationalclient.log`, `rotates: true` (regex: fail→accept, same-IP backreference) | Real mechanism is a stateful 2-stage baseline; the pattern here is a stateless approximation |
+| `gateway_unauthorized_breakin` | `Alert.xml#break-in` | `gateway.log`, `rotates: true` (pattern: `Break-in Attempt`) | Gateway/filer-specific, not an SSH pattern |
+| `gateway_breach_activity` | `Alert.xml#breachval` | *(none)* | 7-day per-worker baseline, ≥2x threshold |
+| `gateway_ransomware_filesystem` | `Alert.xml#amsrans` | *(none)* | `oneCloudFilerx`: >500 files changed within 1 hour |
+| `gateway_ransomware_backup` | `Alert.xml#tier_ran` | *(none)* | Same class of check, scoped to the backup/tiered-storage path |
+| `honeypot` | `Alert.xml#honeypot` | *(none)* | Decoy-directory content diff |
+| `special_folder_monitoring` | `Alert.xml#special_files_honeypot` | `athinio/system/secOpsOutput_128` (judgment) | Per-admin-configured-folder honeypot/immutability/activity checks |
+| `immutable_attribute_drift` | `athinio/system/alertlog.xml#lsattr_status` | `secOpsOutput_96` + `imm_changes`, combined (judgment) | `container`-named entries under `/home/nas/vdc0/`, threshold 5+; doesn't roll up to `Alert.xml` |
+| `secure_vault_ransomware` | `athinio/system/alertlog.xml#SV_Ransom_current_status` | *(none)* | `data_source_reliable: false` — always `cannot_determine`, never actually reached |
+| `clam_malware` | `athinio/security/malwarefiles.xml#nooffile` (`min_value: 1`) | *(none)* | Per-file ClamAV scan markers, aggregated by a compiled binary |
+| `dlp_data_exposure` | `athinio/security/dataprotection.xml#nooffile` (`min_value: 1`) | *(none)* | Same pattern as `clam_malware`; the underlying write logic is confirmed commented out in the deployed scanner |
+| `banned_ip_bruteforce` | `var/neridio/banned_ip.xml` (`non_empty`) | *(none)* | fail2ban's own ban list |
+| `weak_password_accounts` | `athinio/system/user_emptypass_list.xml#NoOfAccounts` (`min_value: 1`) | *(none)* | `/etc/shadow` empty-password scan |
+| `unauthorized_uid0_account` | `athinio/system/zero_uid.xml#NoOfExtraAccounts` (`min_value: 1`) | *(none)* | `/etc/passwd` UID-0 scan; a confirmed real product bug writes the clean-state result to `weak_password_accounts`'s file instead |
+| `orphaned_files` | `athinio/system/nouser_noowner.xml#NoOfFiles` (`min_value: 1`) | *(none)* | `find -nouser -o -nogroup` |
+| `unauthorized_ddl` | `Alert.xml#drop_table`, `#create_table`, `#alter_table`, `#truncate_table` (4 sources) | *(none)* | No confirmed writer script |
+| `log_disable` | `Alert.xml#log_disable` | *(none)* | No confirmed writer script |
 
 For the full narrative behind any row above — real product bugs found,
 mechanism corrections, confirmed-live examples — see that attack type's
@@ -937,10 +894,10 @@ the authoritative source these table rows were summarized from.
 `PersistentClient` collection (`corpus_db/`) that both `ingest_corpus.py`
 writes into and `attack_status_workflow.py` reads from, over MCP.
 
-**Exact lookup — the actual hot path.** `resolve_attack_files_node`
-(§5.1 step 1) calls `get_attack_entry`, which calls `get_corpus_entry`
-with the exact id `attack_<type>` — a plain Chroma `.get(ids=[id])`, no
-embedding or similarity search involved. `analysis_system/lib/attack_status_data.py`:
+**Exact lookup — the actual hot path.** `resolve_attack_node` (§5.1
+step 1) calls `get_attack_entry`, which calls `get_corpus_entry` with the
+exact id `attack_<type>` — a plain Chroma `.get(ids=[id])`, no embedding
+or similarity search involved. `analysis_system/lib/attack_status_data.py`:
 
 ```python
 def get_known_attack_types() -> list[str]:
@@ -1026,7 +983,7 @@ used in exactly two places:
 1. `add_corpus_entry` (called by `ingest_corpus.py` for every
    `corpus_documents/*.json` file) — embeds that entry's `explanation`
    field once, at ingest time. Only `explanation` is embedded, never
-   `raw_content_examples` or other metadata:
+   `evidence_sources`' `examples` or other metadata:
 
    ```python
    @mcp.tool()
