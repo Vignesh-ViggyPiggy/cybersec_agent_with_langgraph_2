@@ -12,10 +12,9 @@
 # machine). No corpus to ingest — this package has no local corpus/database
 # of any kind; the attack checklist comes from hierarchy_system over MCP.
 #
-# No service manager involved — this only installs things. Bring the
-# service up afterward with:
-#   venv/bin/python trigger_mcp_server.py        (Linux)
-#   venv/Scripts/python.exe trigger_mcp_server.py (Windows)
+# There's only one long-running process here (trigger_mcp_server.py).
+# Bring it up afterward with ./start.sh (backgrounds it, writes
+# trigger_mcp_server.pid); stop it again with ./stop.sh.
 #
 # Does NOT touch real IPs: copies .env.example to .env if missing, but you
 # still need to edit .env yourself afterward (MCP_SERVER_URL -> the vault
@@ -124,9 +123,9 @@ ollama create cybersecqwen -f model/Modelfile
 echo "== [5/5] Preparing .env =="
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "Wrote .env from .env.example — edit MCP_SERVER_URL before running trigger_mcp_server.py."
+  echo "Wrote .env from .env.example — edit MCP_SERVER_URL before running ./start.sh."
 fi
 
 echo
 echo "Install complete. Edit .env to point at your vault machine, then run:"
-echo "  $PY trigger_mcp_server.py"
+echo "  ./start.sh"

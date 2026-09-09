@@ -248,3 +248,9 @@ analysis_system/model/*.gguf
 # Packaged installer tarballs — build output of scripts/package_release.sh,
 # not source.
 /dist/
+
+# Runtime PID files written by hierarchy_system/start.sh and
+# analysis_system/start.sh (mcp_server.pid, trigger_mcp_server.pid) —
+# machine-local process state, not source. *.log is already covered above
+# (Django stuff), which also catches mcp_server.log/trigger_mcp_server.log.
+*.pid

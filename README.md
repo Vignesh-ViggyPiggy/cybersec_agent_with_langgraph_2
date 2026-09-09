@@ -27,7 +27,7 @@ For architecture, per-attack-type reference, and code-level detail, see
 │   ├── .env                     # ATTACK_ORDER, ATTACK_PRIMARY_<type>,
 │   │                            # ATTACK_VERIFY_<type>, LOG_FILE_PATHS, etc. —
 │   │                            # the single source of truth for what gets checked
-│   ├── install.sh, requirements.txt, .env.example
+│   ├── install.sh, start.sh, stop.sh, requirements.txt, .env.example
 │
 └── analysis_system/      # the ANALYSIS machine — runs the LangGraph pipeline
     ├── analysis.py                 # the whole pipeline: MCP transport, the
@@ -36,7 +36,7 @@ For architecture, per-attack-type reference, and code-level detail, see
     ├── model/                      # Modelfile (+ your own cybersecqwen.gguf, not committed)
     ├── lib/                        # llm_client.py — the shared Ollama client
     ├── hierarchies/                 # local working dir (git-ignored — pulled data + reports)
-    ├── install.sh, requirements.txt, .env.example
+    ├── install.sh, start.sh, stop.sh, requirements.txt, .env.example
 ```
 
 Neither package touches the other's dependencies — `hierarchy_system`
@@ -120,8 +120,10 @@ etc. to reflect this vault's real attack-checking configuration — see
 sibling vault's `.env`. Then:
 
 ```bash
-python mcp_server.py    # binds 0.0.0.0:8002 — no auth/TLS, trusted-network only
+./start.sh    # backgrounds mcp_server.py, binds 0.0.0.0:8002 — no auth/TLS, trusted-network only
 ```
+Stop it with `./stop.sh`. It's the only long-running process on this
+machine.
 
 ### Analysis machine (`analysis_system/`)
 
@@ -134,8 +136,10 @@ ollama create cybersecqwen -f model/Modelfile   # needs model/cybersecqwen.gguf 
 
 cp .env.example .env    # set MCP_SERVER_URL to the vault machine's mcp_server.py
 
-python trigger_mcp_server.py  # binds 0.0.0.0:8001, exposes analyze_hierarchy(hierarchy, vault_root)
+./start.sh  # backgrounds trigger_mcp_server.py, binds 0.0.0.0:8001, exposes analyze_hierarchy(hierarchy, vault_root)
 ```
+Stop it with `./stop.sh`. It's the only long-running process on this
+machine.
 
 No embedding model, no vector store, no corpus-ingestion step — this
 package has no local knowledge base of any kind. Every attack type it
@@ -209,11 +213,10 @@ cd analysis_system                # or hierarchy_system
 ./install.sh                      # sudo ./install.sh on Rocky 8
 ```
 `hierarchy_system/install.sh` sets up Python + `requirements.txt` only —
-run `mcp_server.py` directly afterward (no starter script needed, it's the
-only long-running process). `analysis_system/install.sh` also installs
-Ollama and builds `cybersecqwen`; once `.env` is set, bring the real
-service up with `venv/bin/python trigger_mcp_server.py` (or the Windows
-equivalent).
+bring `mcp_server.py` up afterward with `./start.sh` (stop with
+`./stop.sh`; it's the only long-running process). `analysis_system/install.sh`
+also installs Ollama and builds `cybersecqwen`; once `.env` is set, bring
+`trigger_mcp_server.py` up the same way, with `./start.sh`/`./stop.sh`.
 
 Neither installer touches real IPs — each copies its own `.env.example` to
 `.env` if one isn't already present, but you still need to edit `.env`

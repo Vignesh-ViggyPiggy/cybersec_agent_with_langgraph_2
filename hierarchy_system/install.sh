@@ -8,10 +8,9 @@
 #     already present.
 # Either way it then creates a venv and installs requirements.txt.
 #
-# There's only one long-running process here (mcp_server.py), so there's
-# no separate starter script — just run it directly once .env is set:
-#   venv/bin/python mcp_server.py        (Linux)
-#   venv/Scripts/python.exe mcp_server.py (Windows)
+# There's only one long-running process here (mcp_server.py). Bring it up
+# with ./start.sh once .env is set (backgrounds it, writes mcp_server.pid);
+# stop it again with ./stop.sh.
 #
 # Does NOT touch real IPs: copies .env.example to .env if missing, but you
 # still need to edit .env yourself afterward (ANALYSIS_SERVER_URL -> the
@@ -78,9 +77,9 @@ if [ -x venv/Scripts/python.exe ]; then PY="venv/Scripts/python.exe"; else PY="v
 
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "Wrote .env from .env.example — edit ANALYSIS_SERVER_URL before running mcp_server.py."
+  echo "Wrote .env from .env.example — edit ANALYSIS_SERVER_URL before running ./start.sh."
 fi
 
 echo
 echo "Install complete. Edit .env to point at your analysis machine, then run:"
-echo "  $PY mcp_server.py"
+echo "  ./start.sh"

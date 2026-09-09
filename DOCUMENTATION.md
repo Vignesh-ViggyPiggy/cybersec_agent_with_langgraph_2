@@ -418,7 +418,11 @@ notes:
   lightweight call, always needed).
 - `trigger_mcp_server.py`'s `analyze_hierarchy(hierarchy, vault_root)` is
   the same `run_full_workflow` under the hood, just reachable over MCP
-  instead of the CLI.
+  instead of the CLI. Bring it up as the long-running service with
+  `./start.sh` (backgrounds it, writes `trigger_mcp_server.pid`); stop
+  with `./stop.sh`. `hierarchy_system/mcp_server.py` has the identical
+  `start.sh`/`stop.sh` pair on the vault side — each machine has exactly
+  one long-running process.
 - Environment variables (`analysis_system/.env`, see `.env.example` for
   the full annotated list): `MCP_SERVER_URL`, `MODEL_NAME` (default
   `cybersecqwen`), `LOG_TAIL_LINES` (default 300 — caps how much of each
