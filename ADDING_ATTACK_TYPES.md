@@ -68,9 +68,14 @@ ATTACK_WRITER_my_new_attack_type="..."     # human-readable provenance
                                             # script's source before
                                             # writing it, not just a guess
                                             # from the tag name
-ATTACK_UI_FEATURE_my_new_attack_type="..." # dashboard feature name, used
-                                            # in a discrepancy's "re-run
-                                            # this" recommendation
+ATTACK_UI_FEATURE_my_new_attack_type="..." # dashboard feature name --
+                                            # parsed and stored, but not
+                                            # currently rendered anywhere
+                                            # in the report (it was only
+                                            # used by a "re-run this from
+                                            # the dashboard" recommendation
+                                            # that no longer exists); safe
+                                            # to leave unset
 ATTACK_RELIABLE_my_new_attack_type=false   # marks the data source itself
                                             # as known-unreliable -- the
                                             # workflow reports "cannot
@@ -78,16 +83,20 @@ ATTACK_RELIABLE_my_new_attack_type=false   # marks the data source itself
                                             # reading it at all, regardless
                                             # of its current value
 ATTACK_CAVEAT_my_new_attack_type="..."     # free-text note, rendered under
-                                            # "Cannot determine" (and kept
-                                            # as documentation generally)
+                                            # "NOT CONFIGURED" when
+                                            # ATTACK_RELIABLE_<type>=false
+                                            # (and kept as documentation
+                                            # generally otherwise)
 ```
 
 `ATTACK_RELIABLE_<type>=false` is for a source you've confirmed is
 structurally untrustworthy — e.g. a file that's never truncated between
 runs, so a "Tampered" reading could be stale from weeks ago rather than
-from this run. Don't reach for it just because a source is unverified;
-that's what the `not_detected_unverifiable` status (no `ATTACK_VERIFY_`
-configured) already covers correctly.
+from this run. Don't reach for it just because a source has no
+`ATTACK_VERIFY_<type>` configured — an unverified primary source is
+already treated as exactly as final as a verified one (there's no
+separate "unverifiable" status); `ATTACK_RELIABLE_<type>=false` is only
+for a source you've actually confirmed can't be trusted at all.
 
 ## Step 4 — decide whether the model needs new training examples
 

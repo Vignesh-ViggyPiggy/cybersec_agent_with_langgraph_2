@@ -101,8 +101,8 @@ flowchart TD
     route1 -->|"data_source_reliable=False"| CD[cannot_determine_node]
     route1 -->|"reliable"| EC[run_evidence_chain_node]
     EC --> route2{route_after_chain}
-    route2 -->|"detected / discrepancy"| AI[attack_info_node]
-    route2 -->|"not_detected / not_detected_unverifiable / not_configured"| RM[render_markdown_section_node]
+    route2 -->|"detected"| AI[attack_info_node]
+    route2 -->|"not_detected / not_configured"| RM[render_markdown_section_node]
     AI --> RM
     CD --> RM
 ```
@@ -113,11 +113,10 @@ flowchart TD
 - **`route_after_resolve`** — `ATTACK_RELIABLE_<type>=false` routes
   straight to `cannot_determine_node`, before any file is even read.
 - **`run_evidence_chain_node`** — the actual evidence resolution (§2).
-  Determines `final_status`: one of `detected`, `discrepancy`,
-  `not_detected`, `not_detected_unverifiable`, `not_configured`,
-  `cannot_determine`.
-- **`attack_info_node`** — only for `detected`/`discrepancy`. Runs its
-  **own** DuckDuckGo search (`"what is a <type> cyberattack"` /
+  Determines `final_status`: one of `detected`, `not_detected`,
+  `not_configured` — exactly three, always (§2.4).
+- **`attack_info_node`** — only for `detected`. Runs its **own**
+  DuckDuckGo search (`"what is a <type> cyberattack"` /
   `"how to respond to and remediate a <type> attack"`) and synthesizes a
   short explanation + recommended actions. Unrelated to the per-source
   judgment above — same model, general instruction-following, not the
@@ -231,30 +230,33 @@ actually saw.
 - Present but empty value → `not_detected`, "no content to judge."
 - A `LITERAL_PHRASE_SOURCES` match (§2.5) → deterministic substring check.
 
-### 2.4 The six `final_status` outcomes
+### 2.4 The three `final_status` outcomes
 
-Derived in `run_evidence_chain_node`:
+Derived in `run_evidence_chain_node`. Exactly three, always — no
+"unverifiable" or "discrepancy" wording exists anywhere in the output:
+whichever source is the LAST one actually evaluated (`state["last_result"]`)
+is simply the final word, whether that's a lone primary source with
+nothing else configured to check it against, or the end of a full
+verification tier.
 
 | Status | When | Rendered as |
 |---|---|---|
-| `detected` | Any primary source reads `detected` | Full section: triggering evidence, raw evidence, attack explainer, search-result links |
-| `discrepancy` | Every primary read clean, but a verification source read `detected` | ⚠ tag said clean but evidence disagreed; recommends re-running the dashboard feature |
-| `not_detected` | Every primary clean AND every configured verification source clean (a missing verify file counts as clean here, §3.1) | ✅ verified clean across N sources |
-| `not_detected_unverifiable` | Every primary clean, **no verification tier configured at all** for this attack type | ✅ not detected, but explicitly notes this couldn't be cross-checked |
-| `not_configured` | The **first** primary source's file doesn't exist at all | ❓ not a clean result — this file was never configured to sync from the client for this hierarchy |
-| `cannot_determine` | `ATTACK_RELIABLE_<type>=false` | ⛔ explicitly not treated as either detected or clean; shows the caveat |
+| `detected` | Any primary source reads `detected`, **or** (only once every primary reads clean) any verification source reads `detected` — either way, immediately, no further checking | Full section: triggering evidence, raw evidence, attack explainer, search-result links |
+| `not_detected` | Every primary clean, and every configured verification source also clean (a missing verify file counts as clean here, §3.1) — including the case where no verification tier is configured at all | ✅ plain "NOT DETECTED", explained using `last_result`'s meaning (the last source actually checked) |
+| `not_configured` | The **first** primary source's file doesn't exist at all, **or** `ATTACK_RELIABLE_<type>=false` (`unreliable_source=True` in state, distinguishing the two for rendering) | ❓ names the expected file that wasn't found, or explains the source is marked unreliable |
 
-Note the asymmetry in `not_configured`: only the *first* primary source's
-absence triggers it (checked once, at `i == 0` in the primary loop) — a
-later co-equal primary source being absent just means one fewer source to
-check, since any remaining one can still resolve the attack type.
+Note the asymmetry in the missing-file case: only the *first* primary
+source's absence triggers `not_configured` (checked once, at `i == 0` in
+the primary loop) — a later co-equal primary source being absent just
+means one fewer source to check, since any remaining one can still
+resolve the attack type.
 
-`not_detected_unverifiable` is rendered with the display label
-`"NOT DETECTED"` (the same as `not_detected`) — the verified/unverified
-distinction is conveyed by the surrounding prose (the `STATUS_MARKER`
-HTML comment still carries the real internal value for
-`parse_deterministic_summary`'s regex count), not a separate status word
-in the human-facing heading.
+A verification source disagreeing with an already-clean primary reading
+doesn't get any special wording — it's simply `detected`, rendered
+identically to a primary source firing, using the verification source's
+own evidence and meaning. There is no separate "the tag said clean but
+independent evidence disagreed" status; the last source checked is
+authoritative, full stop.
 
 ### 2.5 The literal-phrase exception
 
@@ -349,11 +351,9 @@ non-rotating filename if that's ever what exists instead.
 **primary**-tier file resolves that attack type as `not_configured`. A
 missing **verify**-tier file, when a verify tier IS configured, is
 treated as clean by default (same free resolution as an empty file, §2.3)
-— confirmed this actually produces `not_detected` (verified clean), *not*
-`not_detected_unverifiable`; that status specifically means no verify
-tier was configured for this attack type at all, not that a configured
-one's file happened to be missing. Nothing in `run_attack_status_loop`
-errors on an absent file — see §2.4.
+— it simply resolves as `not_detected`, exactly like a genuinely clean
+read would. Nothing in `run_attack_status_loop` errors on an absent
+file — see §2.4.
 
 ---
 

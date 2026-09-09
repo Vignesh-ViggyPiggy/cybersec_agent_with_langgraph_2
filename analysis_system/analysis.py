@@ -39,8 +39,9 @@ attack_status_workflow.py + lib/*, with three deliberate differences:
    which tag maps to which attack type, and which few tags were left out as
    pure metrics/timestamps rather than attack indicators).
 
-Everything else — the six final_status outcomes (detected / discrepancy /
-not_detected / not_detected_unverifiable / not_configured / cannot_determine),
+Everything else — the three final_status outcomes (detected / not_detected /
+not_configured — the last source actually evaluated is always the final
+word, whether that's a lone primary or the end of a verification tier),
 the primary-then-verification tier structure, the markdown report shape, and
 the always-run catch-all log analysis pass — is unchanged in spirit from the
 old package.
@@ -306,7 +307,16 @@ class AttackState(TypedDict):
     primary_results: NotRequired[list[EvidenceSourceResult]]
     verification_results: NotRequired[list[EvidenceSourceResult]]
     triggering_results: NotRequired[list[EvidenceSourceResult]]
-    final_status: NotRequired[str]     # detected | not_detected | not_detected_unverifiable | discrepancy | not_configured | cannot_determine
+    last_result: NotRequired[EvidenceSourceResult]   # the LAST source actually evaluated -- its
+                                                       # meaning is what "not detected" explains with
+    final_status: NotRequired[str]     # detected | not_detected | not_configured (three outcomes only --
+                                        # a source disagreeing with an earlier clean one still just
+                                        # resolves as whatever the LAST source found; an unreliable
+                                        # data source (ATTACK_RELIABLE=false) resolves as not_configured too)
+    unreliable_source: NotRequired[bool]   # True only for the ATTACK_RELIABLE=false path -- distinguishes
+                                            # "marked unreliable" from "file genuinely missing" within the
+                                            # single not_configured status, for rendering (both still leave
+                                            # final_status == "not_configured")
     explainer_text: NotRequired[str]
     corroborating_evidence_text: NotRequired[str]
     attack_search_results: NotRequired[list[dict]]
@@ -563,24 +573,33 @@ def route_after_resolve(state: AttackState) -> str:
 
 
 def cannot_determine_node(state: AttackState) -> AttackState:
-    return {**state, "final_status": "cannot_determine"}
+    """ATTACK_RELIABLE_<type>=false: deliberately never reads the file at
+    all (the source is untrustworthy independent of its current value) --
+    resolves as not_configured, same status as a genuinely missing file,
+    distinguished only by unreliable_source=True for rendering (§ caveat
+    text instead of a missing-file path)."""
+    return {**state, "final_status": "not_configured", "unreliable_source": True}
 
 
 def run_evidence_chain_node(state: AttackState) -> AttackState:
-    """Two tiers, walked in order:
+    """Two tiers, walked in order, only three possible outcomes:
 
     PRIMARY tier — the live status read(s). All primary sources are
     evaluated (not stopped at the first), because a multi-tag attack type
     (e.g. ransomware's 5 co-equal tags) needs every triggered one reported.
-    Any primary source detected -> final_status "detected". The FIRST
-    primary source's file being missing means this attack type's status
-    can't be determined at all for this hierarchy -> "not_configured".
+    Any primary source detected -> final_status "detected", immediately --
+    a real signal is never held back waiting on further confirmation. The
+    FIRST primary source's file being missing means this attack type's
+    status can't be determined at all for this hierarchy -> "not_configured".
 
     VERIFICATION tier — only reached if every primary source read clean.
-    Walked in order; the first one to read "detected" makes this a
-    "discrepancy". If every configured verification source reads clean,
-    "not_detected". No verification tier, or none conclusive ->
-    "not_detected_unverifiable"."""
+    Walked in order; whichever source is LAST actually evaluated is the
+    one this attack type's final verdict is based on -- if verification is
+    configured and reaches a "detected" reading, that's the final answer
+    (immediately, same as primary); if every configured verification
+    source reads clean (or none is configured at all), "not_detected" --
+    a single primary source with no verification tier configured is
+    exactly as final as a primary source that got corroborated by three."""
     hierarchy_root = _hierarchy_path(state["vault_root"], state["hierarchy"])
     primary_specs = state.get("primary_specs") or []
     verify_specs = state.get("verify_specs") or []
@@ -595,7 +614,7 @@ def run_evidence_chain_node(state: AttackState) -> AttackState:
     detected_primaries = [r for r in primary_results if r["verdict"] == "detected"]
     if detected_primaries:
         return {**state, "primary_results": primary_results, "triggering_results": detected_primaries,
-                "final_status": "detected"}
+                "last_result": detected_primaries[-1], "final_status": "detected"}
 
     verification_results: list[EvidenceSourceResult] = []
     for spec in verify_specs:
@@ -603,22 +622,19 @@ def run_evidence_chain_node(state: AttackState) -> AttackState:
         verification_results.append(result)
         if result["verdict"] == "detected":
             return {**state, "primary_results": primary_results, "verification_results": verification_results,
-                    "triggering_results": [result], "final_status": "discrepancy"}
+                    "triggering_results": [result], "last_result": result, "final_status": "detected"}
 
-    verified_clean_count = sum(1 for r in verification_results if r["verdict"] == "not_detected")
-    final_status = "not_detected" if verified_clean_count >= 1 and verification_results and \
-        all(r["verdict"] == "not_detected" for r in verification_results) else "not_detected_unverifiable"
-
+    last_result = verification_results[-1] if verification_results else primary_results[-1]
     return {**state, "primary_results": primary_results, "verification_results": verification_results,
-            "final_status": final_status}
+            "last_result": last_result, "final_status": "not_detected"}
 
 
 def route_after_chain(state: AttackState) -> str:
-    return "attack_info" if state["final_status"] in ("detected", "discrepancy") else "render"
+    return "attack_info" if state["final_status"] == "detected" else "render"
 
 
 def _read_corroborating_evidence(state: AttackState) -> str:
-    """Displays every evidence source actually read on a detected/discrepancy
+    """Displays every evidence source actually read on a detected
     result, not just whichever one specifically triggered it."""
     pieces = []
     for tier_results in (state.get("primary_results") or [], state.get("verification_results") or []):
@@ -683,13 +699,16 @@ def attack_info_node(state: AttackState) -> AttackState:
 
 
 def render_markdown_section_node(state: AttackState) -> AttackState:
+    """Exactly three outcomes are ever rendered: DETECTED (with evidence
+    and explanation), NOT DETECTED (plain), and NOT CONFIGURED (naming the
+    expected file, or the unreliable-source reason). Whichever source was
+    LAST actually evaluated (state["last_result"] -- primary if no
+    verification tier applies, verification if one does) is what a "not
+    detected" reading explains itself with; a single primary source with
+    nothing configured to check it against is exactly as final as one that
+    got corroborated by three."""
     attack_label = state["attack_type"].replace("_", " ").title()
     final_status = state["final_status"]
-
-    # not_detected_unverifiable is displayed as plain "NOT DETECTED" — the
-    # unverified/verified distinction is conveyed by whether a verification
-    # tier was actually checked, not by a separate status word.
-    display_status = "not_detected" if final_status == "not_detected_unverifiable" else final_status
 
     def _label(r: EvidenceSourceResult) -> str:
         """The tag name is more specific than the file when the source is
@@ -701,7 +720,7 @@ def render_markdown_section_node(state: AttackState) -> AttackState:
     labels_checked = ", ".join(dict.fromkeys(_label(r) for r in all_results)) or "(none read)"
 
     lines = [f"## {attack_label}", "", f"<!-- {STATUS_MARKER}: {final_status} -->"]
-    lines.append(f"**Status:** {display_status.replace('_', ' ').upper()}")
+    lines.append(f"**Status:** {final_status.replace('_', ' ').upper()}")
     lines.append(f"\n**Source chain:**\n{_format_provenance_chain(state.get('writer_script', 'unknown'), files_checked)}")
 
     if final_status == "detected":
@@ -716,59 +735,35 @@ def render_markdown_section_node(state: AttackState) -> AttackState:
         lines.append(f"\n### What this attack is / recommended actions\n\n{state.get('explainer_text', '')}")
         lines.append(_render_search_results_section(state.get("attack_search_results") or []))
 
-    elif final_status == "discrepancy":
-        triggering = (state.get("triggering_results") or [{}])[0]
-        lines.append(
-            f"\n⚠ The status tag says 'not detected', but independent review of `{_label(triggering) if triggering else '?'}` "
-            f"disagreed: {triggering.get('meaning', '')}"
-        )
-        feature_ref = state.get("ui_feature_name") or f"the feature that manages `{state.get('writer_script', 'unknown')}`"
-        lines.append(
-            f"\n**Recommended:** re-run **{feature_ref}** from the dashboard "
-            f"for an authoritative fresh determination."
-        )
-        if state.get("corroborating_evidence_text"):
-            lines.append(f"\n### Corroborating raw evidence\n\n```\n{state['corroborating_evidence_text']}\n```")
-        lines.append(f"\n### What this attack is / recommended actions\n\n{state.get('explainer_text', '')}")
-        lines.append(_render_search_results_section(state.get("attack_search_results") or []))
-
     elif final_status == "not_detected":
-        lines.append(f"\n✅ Not detected. Verified clean across {len(all_results)} evidence source(s): {files_checked}.")
-
-    elif final_status == "not_detected_unverifiable":
-        primary_results = state.get("primary_results") or []
-        live_value_display = primary_results[0].get("content") if primary_results else None
-        primary_meaning = primary_results[0].get("meaning", "") if primary_results else ""
-        if live_value_display and "\n" in str(live_value_display):
-            value_line = f"currently reads:\n\n```\n{live_value_display}\n```"
+        last_result = state.get("last_result") or {}
+        value_display = last_result.get("content")
+        meaning = last_result.get("meaning", "")
+        if value_display and "\n" in str(value_display):
+            value_line = f"currently reads:\n\n```\n{value_display}\n```"
         else:
-            value_line = f"currently reads `{live_value_display}`."
-        lines.append(
-            f"\n✅ Not detected -- `{files_checked}` {value_line}\n\n"
-            f"No further evidence source was conclusive, so this reading could not be "
-            f"cross-checked against anything else — it reflects only what the primary source reports."
-        )
-        lines.append(f"\n**What determines this status:**\n\n{primary_meaning}")
+            value_line = f"currently reads `{value_display}`."
+        lines.append(f"\n✅ **NOT DETECTED.** `{_label(last_result) if last_result else files_checked}` {value_line}")
+        if meaning:
+            lines.append(f"\n{meaning}")
 
-    elif final_status == "not_configured":
-        primary_results = state.get("primary_results") or []
-        first_file_display = primary_results[0]["file"] if primary_results else "?"
-        vault_display = f"rationalVault/data/{state['hierarchy']}/{first_file_display}"
-        lines.append(
-            f"\n❓ **File not configured for this system.** `{first_file_display}` was not "
-            f"found at `{vault_display}`. This file was not configured to be copied to the "
-            f"RV server from the client system for this hierarchy, so this attack type's "
-            f"status could not be checked — this is not the same as a clean result."
-        )
-
-    else:  # cannot_determine
-        lines.append(
-            "\n⛔ **Cannot determine.** The data source for this attack type is known "
-            "to be unreliable independent of its current value — see the note below. "
-            "Do not treat this as either detected or clean."
-        )
-        if state.get("caveat"):
-            lines.append(f"\n{state['caveat']}")
+    else:  # not_configured -- either a missing file, or ATTACK_RELIABLE_<type>=false
+        if state.get("unreliable_source"):
+            lines.append(
+                "\n❓ **NOT CONFIGURED.** This attack type's data source is marked unreliable, "
+                "so it isn't read at all rather than risk a misleading result."
+            )
+            if state.get("caveat"):
+                lines.append(f"\n{state['caveat']}")
+        else:
+            primary_results = state.get("primary_results") or []
+            first_file_display = primary_results[0]["file"] if primary_results else "?"
+            vault_display = f"rationalVault/data/{state['hierarchy']}/{first_file_display}"
+            lines.append(
+                f"\n❓ **NOT CONFIGURED.** Expected `{first_file_display}` at `{vault_display}`, "
+                f"but it wasn't found — this file isn't configured to sync from the client for "
+                f"this hierarchy."
+            )
 
     return {**state, "markdown_section": "\n".join(lines) + "\n"}
 
@@ -882,7 +877,7 @@ def parse_deterministic_summary(report_path: Path) -> dict:
 def render_summary_block(counts: dict) -> str:
     total = sum(counts.values())
     lines = ["## Summary", "", f"**{total} attack types checked.**", ""]
-    for status in ("detected", "discrepancy", "not_detected", "not_detected_unverifiable", "cannot_determine", "not_configured"):
+    for status in ("detected", "not_detected", "not_configured"):
         if status in counts:
             lines.append(f"- {status.replace('_', ' ')}: {counts[status]}")
     return "\n".join(lines) + "\n"

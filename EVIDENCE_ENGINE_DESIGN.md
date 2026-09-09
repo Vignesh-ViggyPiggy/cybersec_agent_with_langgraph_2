@@ -74,15 +74,24 @@ matcher is needed either. See `_judge_content_with_model` in
 call): a missing file, or a present-but-empty value — nothing to judge
 either way.
 
-**Everything else — the six `final_status` outcomes (`detected` /
-`discrepancy` / `not_detected` / `not_detected_unverifiable` /
-`not_configured` / `cannot_determine`), the primary-then-verification tier
-structure, the markdown report shape — is unchanged in spirit from the
-original design.** A primary source reading "detected" is a `detected`
-result; a clean primary gets cross-checked against a verification tier
-(only reached once every primary source reads clean), and a verification
-source disagreeing produces a `discrepancy`. This tiered structure proved
-sound in the original design and carried over directly.
+**Everything else — the primary-then-verification tier structure and the
+markdown report shape — is unchanged in spirit from the original
+design; the output vocabulary itself was later simplified to exactly
+three `final_status` outcomes: `detected`, `not_detected`,
+`not_configured`.** A primary source reading "detected" is a `detected`
+result, immediately. A clean primary gets cross-checked against a
+verification tier (only reached once every primary source reads clean);
+if verification disagrees and reads `detected`, that's simply `detected`
+too — the LAST source actually evaluated is always the final word,
+whether that's a lone primary with nothing else configured to check it,
+or the end of a verification tier. There's no separate "unverifiable" or
+"discrepancy" status: a single unverified primary source is exactly as
+final as one corroborated by three, and a verification tier disagreeing
+with a clean primary isn't flagged specially — it's just the detection
+that tier actually surfaced. `ATTACK_RELIABLE_<type>=false` and a
+genuinely missing primary file both resolve as `not_configured`,
+distinguished only by an internal flag for rendering (the caveat text
+vs. the missing file's path).
 
 ## 3. Evidence source shapes
 
