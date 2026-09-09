@@ -239,8 +239,8 @@ Derived in `run_evidence_chain_node`:
 |---|---|---|
 | `detected` | Any primary source reads `detected` | Full section: triggering evidence, raw evidence, attack explainer, search-result links |
 | `discrepancy` | Every primary read clean, but a verification source read `detected` | ⚠ tag said clean but evidence disagreed; recommends re-running the dashboard feature |
-| `not_detected` | Every primary clean AND every configured verification source clean | ✅ verified clean across N sources |
-| `not_detected_unverifiable` | Every primary clean, no verification tier configured (or none conclusive) | ✅ not detected, but explicitly notes this couldn't be cross-checked |
+| `not_detected` | Every primary clean AND every configured verification source clean (a missing verify file counts as clean here, §3.1) | ✅ verified clean across N sources |
+| `not_detected_unverifiable` | Every primary clean, **no verification tier configured at all** for this attack type | ✅ not detected, but explicitly notes this couldn't be cross-checked |
 | `not_configured` | The **first** primary source's file doesn't exist at all | ❓ not a clean result — this file was never configured to sync from the client for this hierarchy |
 | `cannot_determine` | `ATTACK_RELIABLE_<type>=false` | ⛔ explicitly not treated as either detected or clean; shows the caveat |
 
@@ -304,6 +304,56 @@ as-is) or paths relative to the hierarchy being analyzed, resolved as
 `<local_root>/<hierarchy>/<path>` by `_consolidate_local_log_files`.
 Falls back to `var/log/messages`, `var/log/secure`, `var/log/audit.log`
 if unset.
+
+### 3.1 Per-hierarchy data layout
+
+Every path below is resolved relative to `rationalVault/data/<hierarchy>/`
+(e.g. `rationalVault/data/5/101/1/4/1/`) on the vault machine — this is
+the complete set of real files the currently-configured `.env` reads,
+generated directly from it (`ATTACK_PRIMARY_<type>`/`ATTACK_VERIFY_<type>`/
+`LOG_FILE_PATHS`, every source across all 34 currently-configured attack
+types). It will drift as attack types are added/changed — the `.env`
+itself is the only truly authoritative source; treat this table as a
+point-in-time derived reference, not something to hand-maintain in sync.
+
+| Path | Rotates? | Read by (attack type) |
+|---|---|---|
+| `Alert.xml` | no | `authentication_failures_threshold`, `database_ransomware`, `file_integrity_violation`, `gateway_breach_activity`, `gateway_ransomware_backup`, `gateway_ransomware_filesystem`, `gateway_unauthorized_breakin`, `honeypot`, `honeypot_process_triggered`, `log_disable`, `log_tampering_detected`, `monitoring_agent_disabled`, `network_anomaly_detected`, `process_anomaly`, `ransomware`, `security_config`, `special_folder_monitoring`, `ssh_key_injection_detected`, `suspicious_commands_detected`, `unauthorized_ddl`, `unknown_binary_detection`, `user_breach` |
+| `athinio/security/dataprotection.xml` | no | `dlp_data_exposure` |
+| `athinio/security/malwarefiles.xml` | no | `clam_malware` |
+| `athinio/system/alertlog.xml` | no | `config_xml_drift`, `gateway_breach_activity`, `gateway_ransomware_backup`, `gateway_ransomware_filesystem`, `gateway_unauthorized_breakin`, `honeypot`, `immutable_attribute_drift`, `log_disable`, `onegrid_config_drift`, `process_anomaly`, `ransomware`, `secure_vault_ransomware`, `unknown_binary_detection`, `user_breach` |
+| `athinio/system/nouser_noowner.xml` | no | `orphaned_files` |
+| `athinio/system/secOpsOutput_91` | no | `rootkit_malware` |
+| `athinio/system/secOpsOutput_94` | no | `config_drift` (primary; whole-file text) |
+| `athinio/system/secOpsOutput_96` | no | `immutable_attribute_drift` (verify) |
+| `athinio/system/secOpsOutput_112` | no | `unknown_binary_detection` (verify) |
+| `athinio/system/secOpsOutput_128` | no | `special_folder_monitoring` (verify) |
+| `athinio/system/user_emptypass_list.xml` | no | `weak_password_accounts` |
+| `athinio/system/zero_uid.xml` | no | `unauthorized_uid0_account` |
+| `athinio/tmp/imm_changes` | no | `immutable_attribute_drift` (verify, combined with `secOpsOutput_96`) |
+| `home/athinio/data/1cloudFiler/log/gateway.log` | **yes** | `gateway_unauthorized_breakin` (verify; also a `LITERAL_PHRASE_SOURCES` entry, §2.5) |
+| `rationalVault/log/rationalclient.log` | **yes** | `config_drift`, `unknown_binary_detection` (both combined with `osstatus.log`), `user_breach` (combined with `var/log/secure`) |
+| `var/log/osstatus.log` | **yes** | `config_drift`, `unknown_binary_detection` |
+| `var/log/secure` | no | `user_breach` (verify) — also read by the catch-all log-analysis pass |
+| `var/log/messages`, `var/log/audit.log` | no | catch-all log-analysis pass only (§1.4) — no attack-type check reads these directly |
+| `var/neridio/banned_ip.xml` | no | `banned_ip_bruteforce` (primary; whole-file text) |
+
+Rows marked **rotates** are only ever present on the real system under a
+numbered suffix (`gateway.log_230`, `rationalclient.log_237`, ...), never
+the bare filename — `_read_evidence_source`'s prefix-glob (`path*`)
+handles this transparently, matching every numbered copy present and
+combining them into one reading (§2.2) as well as matching a bare,
+non-rotating filename if that's ever what exists instead.
+
+**None of this is a hard requirement for a run to succeed.** A missing
+**primary**-tier file resolves that attack type as `not_configured`. A
+missing **verify**-tier file, when a verify tier IS configured, is
+treated as clean by default (same free resolution as an empty file, §2.3)
+— confirmed this actually produces `not_detected` (verified clean), *not*
+`not_detected_unverifiable`; that status specifically means no verify
+tier was configured for this attack type at all, not that a configured
+one's file happened to be missing. Nothing in `run_attack_status_loop`
+errors on an absent file — see §2.4.
 
 ---
 

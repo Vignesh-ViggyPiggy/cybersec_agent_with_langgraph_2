@@ -48,6 +48,61 @@ files at `localhost`.
 
 ---
 
+## Required directory structure per hierarchy
+
+For full checking coverage, this is what should exist under
+`rationalVault/data/<hierarchy>/` (e.g. `rationalVault/data/5/101/1/4/1/`)
+on the vault machine — derived from the current `hierarchy_system/.env`:
+
+```
+rationalVault/data/<hierarchy>/
+├── Alert.xml                       # read by ~20 attack types (one tag each)
+├── athinio/
+│   ├── security/
+│   │   ├── dataprotection.xml       # dlp_data_exposure
+│   │   └── malwarefiles.xml         # clam_malware
+│   ├── system/
+│   │   ├── alertlog.xml             # verify tier for ~10 attack types
+│   │   ├── nouser_noowner.xml       # orphaned_files
+│   │   ├── secOpsOutput_91          # rootkit_malware
+│   │   ├── secOpsOutput_94          # config_drift
+│   │   ├── secOpsOutput_96          # immutable_attribute_drift
+│   │   ├── secOpsOutput_112         # unknown_binary_detection
+│   │   ├── secOpsOutput_128         # special_folder_monitoring
+│   │   ├── user_emptypass_list.xml  # weak_password_accounts
+│   │   └── zero_uid.xml             # unauthorized_uid0_account
+│   └── tmp/
+│       └── imm_changes              # immutable_attribute_drift (verify)
+├── home/athinio/data/1cloudFiler/log/
+│   └── gateway.log*                 # gateway_unauthorized_breakin (verify)
+├── rationalVault/log/
+│   └── rationalclient.log*          # config_drift, unknown_binary_detection, user_breach
+└── var/
+    ├── log/
+    │   ├── audit.log                # catch-all log analysis only
+    │   ├── messages                 # catch-all log analysis only
+    │   ├── osstatus.log*             # config_drift, unknown_binary_detection
+    │   └── secure                    # user_breach (verify) + catch-all log analysis
+    └── neridio/
+        └── banned_ip.xml             # banned_ip_bruteforce
+```
+
+`*` marks files that rotate on the real system (`gateway.log_230`,
+`rationalclient.log_237`, ...) — every plain-text path is matched as a
+prefix, so both the bare name and any rotated copies are picked up
+automatically.
+
+**Nothing here is a hard requirement** — a missing primary file just
+resolves that attack type as `not_configured` rather than erroring, and a
+missing verify file is treated as clean by default (same as a genuinely
+clean read). This table is a snapshot for reference; `hierarchy_system/.env`'s
+`ATTACK_PRIMARY_<type>`/`ATTACK_VERIFY_<type>`/`LOG_FILE_PATHS` are the actual, authoritative
+source and will drift from this list as attack types are added or
+changed — see [DOCUMENTATION.md § 3](DOCUMENTATION.md#3-hierarchy_systemenv-schema)
+for the full per-path breakdown.
+
+---
+
 ## Setup
 
 ### Vault machine (`hierarchy_system/`)
