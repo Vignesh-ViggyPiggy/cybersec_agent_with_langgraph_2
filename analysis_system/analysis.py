@@ -229,6 +229,174 @@ def fetch_attack_checklist() -> dict:
     return _call_mcp_tool("get_attack_checklist", {})
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# threat_intel_system integration — entirely optional. THREAT_INTEL_SERVER_URL
+# unset (the default) means the log-analysis pass behaves EXACTLY as it did
+# before this existed: no extra calls, no extra latency, no behavior change
+# at all. When it IS set, _threat_intel_available() does one short-timeout
+# health check per run (not per log line) -- if that fails too (server
+# configured but not actually reachable), the same unchanged fallback
+# applies. Either way, this package never assumes the store exists.
+# ═════════════════════════════════════════════════════════════════════════
+
+THREAT_INTEL_SERVER_URL = os.getenv("THREAT_INTEL_SERVER_URL") or None
+THREAT_INTEL_TIMEOUT_SECONDS = float(os.getenv("THREAT_INTEL_TIMEOUT_SECONDS", "5"))
+
+# Simple candidate-token extraction for the IOC lookup -- IPv4 only for now,
+# matching what's actually ingested (e.g. ingest_feodotracker.py). Garbage
+# tokens are harmless: lookup_observables is an exact-match query, so a
+# non-IOC-looking substring that happens to match this regex just fails to
+# match anything in the store.
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+async def _call_threat_intel_tool_async(toolname: str, args: dict, timeout: float):
+    client = Client(THREAT_INTEL_SERVER_URL)
+    async with client:
+        result = await asyncio.wait_for(client.call_tool(toolname, args), timeout=timeout)
+        return _extract_tool_result(result)
+
+
+def _call_threat_intel_tool(toolname: str, args: dict, timeout: float | None = None):
+    return asyncio.run(_call_threat_intel_tool_async(toolname, args, timeout or THREAT_INTEL_TIMEOUT_SECONDS))
+
+
+def _threat_intel_available() -> bool:
+    """One cheap health check, called once per log-analysis run -- not
+    once per lookup. Any failure (unset URL, connection refused, timeout)
+    means "behave as if this package doesn't exist," never a crash."""
+    if not THREAT_INTEL_SERVER_URL:
+        return False
+    try:
+        _call_threat_intel_tool("stats", {}, timeout=min(3.0, THREAT_INTEL_TIMEOUT_SECONDS))
+        return True
+    except Exception as e:
+        print(f"  (threat_intel_system configured at {THREAT_INTEL_SERVER_URL} but not reachable: {e} "
+              f"-- falling back to log analysis without CTI grounding)")
+        return False
+
+
+def _lookup_ioc_matches(logs_content: str) -> list[dict]:
+    """Deterministic Tier 1: exact-match candidate IOC tokens found in the
+    raw log text against the CTI store's observables table. A real hit
+    here is treated the same way LITERAL_PHRASE_SOURCES treats a literal
+    grep match elsewhere in this file -- a known-bad indicator's presence
+    is a fact, not something that needs an LLM's judgment call."""
+    candidates = sorted(set(_IPV4_RE.findall(logs_content)))
+    if not candidates:
+        return []
+    try:
+        return _call_threat_intel_tool("lookup_observables", {"tokens": candidates})
+    except Exception as e:
+        print(f"  (threat_intel_system IOC lookup failed: {e} -- continuing without it)")
+        return []
+
+
+def _get_relevant_narratives(text: str, top_k: int = 3) -> list[dict]:
+    """Tier 2: embeds `text` and returns the most similar ingested
+    behavioral narratives. This is CONTEXT for the model's own judgment,
+    never proof of anything by itself -- see the grounding instructions in
+    InitialSearchFromLogsToDatasetNode, which mirror the same discipline
+    already applied to DDG search results in _explain_incident (background
+    reference material, not a report of what happened on THIS system)."""
+    try:
+        return _call_threat_intel_tool("get_relevant_narratives", {"text": text, "top_k": top_k})
+    except Exception as e:
+        print(f"  (threat_intel_system narrative lookup failed: {e} -- continuing without it)")
+        return []
+
+
+def _split_log_sections(logs_content: str) -> list[tuple[str, str]]:
+    """Splits the "===== path =====\\ncontent" blob _consolidate_local_log_files
+    produces back into its per-file sections. Confirmed necessary the hard
+    way: embedding an arbitrary character-prefix of the WHOLE combined blob
+    dilutes a small file's own signal with however much of a much larger
+    sibling file happens to fall in that prefix too -- a genuine screen-
+    capture-malware log got missed this way once a much larger, unrelated
+    audit.log was combined alongside it, even though the raw text was
+    fully present. Retrieval and the focused check below both operate on
+    one file's own content at a time instead."""
+    parts = re.split(r"^===== (.+?) =====$", logs_content, flags=re.MULTILINE)
+    sections = []
+    for i in range(1, len(parts), 2):
+        path = parts[i].strip()
+        content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+        if content:
+            sections.append((path, content))
+    return sections or [("(combined)", logs_content)]
+
+
+class FocusedNarrativeMatchTemplate(BaseModel):
+    matches: bool = Field(
+        description="True only if the content LITERALLY shows behavior matching the described "
+                    "technique -- not just thematically similar wording or vocabulary overlap."
+    )
+
+
+def _confirm_narrative_match(section_content: str, narrative: dict) -> bool:
+    """A second, focused, undiluted judgment call: given ONLY this one
+    section's content (not the whole combined blob) and ONE specific
+    candidate narrative, does the content genuinely match? This is what
+    actually fixes the dilution problem above -- a small anomaly gets its
+    own dedicated yes/no decision instead of competing for attention
+    against however many hundred unrelated lines happen to be combined
+    alongside it in one pass."""
+    structured_model = model.with_structured_output(FocusedNarrativeMatchTemplate)
+    template = ChatPromptTemplate.from_messages([
+        ("system", "You are a cybersecurity analyst. You are given ONE log file's raw content and ONE "
+                   "candidate threat-intelligence technique description, retrieved because it seemed "
+                   "topically similar. Decide whether the content LITERALLY shows behavior matching "
+                   "that specific technique -- not just thematically related wording. Be strict: only "
+                   "true if the described actions genuinely, concretely appear in this content. Pay "
+                   "attention to details that would rule the technique OUT -- e.g. if the technique "
+                   "requires a file and the log explicitly says no file exists, or the technique "
+                   "requires one specific mechanism and the log describes a different one, answer "
+                   "false even if the general topic overlaps. When two techniques are closely related, "
+                   "only confirm the one whose specific mechanism is actually described."),
+        ("user", "Technique: {title} ({technique})\nDescription: {narrative}\n\nLog content:\n{content}"),
+    ])
+    try:
+        result = (template | structured_model).invoke({
+            "title": narrative.get("title", ""),
+            "technique": narrative.get("mitre_technique") or "none",
+            "narrative": narrative.get("narrative", ""),
+            "content": section_content[:3000],
+        })
+        return bool(result.matches)
+    except Exception as e:
+        print(f"  (focused narrative confirmation failed: {e} -- treating as no confirmed match)")
+        return False
+
+
+def _check_narratives_per_section(logs_content: str, similarity_threshold: float = 0.55):
+    """Runs narrative retrieval PER log-file section rather than once on
+    an arbitrary prefix of the whole combined blob (see
+    _split_log_sections). Any section whose top candidate clears
+    similarity_threshold gets the focused confirmation call above; the
+    first section that confirms short-circuits the rest. Returns
+    (confirmed_hit_or_None, best_narratives_seen) -- confirmed_hit is
+    (section_path, narrative) or None; best_narratives_seen is kept for
+    soft context injection into the main classifier even when nothing
+    confirms, same purpose the old single global lookup served."""
+    best_seen: list[dict] = []
+    for path, content in _split_log_sections(logs_content):
+        section_narratives = _get_relevant_narratives(content[:2000], top_k=2)
+        if not section_narratives:
+            continue
+        best_seen.append(section_narratives[0])
+        for candidate in section_narratives:
+            if candidate.get("similarity", 0) < similarity_threshold:
+                continue
+            print(f"  Candidate narrative match on {path}: {candidate.get('title')} "
+                  f"(similarity {candidate.get('similarity', 0):.2f}) -- running focused confirmation...")
+            if _confirm_narrative_match(content, candidate):
+                print(f"  ✓ Confirmed: {path} genuinely matches {candidate.get('title')}")
+                return (path, candidate), best_seen
+            print(f"  ✗ Not confirmed -- content doesn't literally match despite topical similarity")
+    best_seen.sort(key=lambda n: n.get("similarity", 0), reverse=True)
+    return None, best_seen[:3]
+
+
 def populate_hierarchies(root_path: str, dest_dir: Path, hierarchy: str | None = None) -> None:
     """Pulls a vault subtree via MCP and writes it under dest_dir/<hierarchy>,
     mirroring the server-side {company}/{customer}/{branch}/{product}/{system}
@@ -913,6 +1081,14 @@ ALLOWED_INCIDENT_TYPES = {
     "disk_full",
     "memory_leak",
     "network_anomaly",
+    # Only ever chosen via threat_intel_system grounding (see
+    # _threat_intel_available/_lookup_ioc_matches/_get_relevant_narratives)
+    # -- either a literal known-bad indicator matched exactly, or the model
+    # judged the logs genuinely match a retrieved CTI narrative and no
+    # other category above already fits better. Never reachable when no
+    # threat-intel store is configured/running, same as every other type
+    # here is never reachable from log content that doesn't support it.
+    "threat_intel_match",
 }
 
 INCIDENT_TYPES = sorted(ALLOWED_INCIDENT_TYPES)
@@ -1164,6 +1340,69 @@ def InitialSearchFromLogsToDatasetNode(state: MessageState) -> MessageState:
     prior_result = dict(state.get("result", {}))
     title = str(prior_result.get("title", "Potential Security Incident"))
     content = str(prior_result.get("content", ""))
+    logs_text = state["logs"]
+
+    # threat_intel_system grounding -- entirely a no-op (zero extra calls,
+    # zero behavior change) when THREAT_INTEL_SERVER_URL isn't set or isn't
+    # actually reachable. See the module-level helpers for why: a literal
+    # IOC match is deterministic (short-circuits below, same as
+    # LITERAL_PHRASE_SOURCES elsewhere in this file); a narrative match is
+    # only ever CONTEXT for the model's own literal-log-grounded judgment,
+    # never proof by itself.
+    threat_intel_on = _threat_intel_available()
+    ioc_matches: list[dict] = []
+    narratives: list[dict] = []
+    confirmed_narrative_hit = None
+    if threat_intel_on:
+        ioc_matches = _lookup_ioc_matches(logs_text)
+        if not ioc_matches:
+            confirmed_narrative_hit, narratives = _check_narratives_per_section(logs_text)
+
+    if ioc_matches:
+        m = ioc_matches[0]
+        print(f"✓ attack_detected: True (threat-intel IOC match: {m['ioc_value']}, source={m.get('source')})")
+        return {
+            **_carry_context(state),
+            "logs": state["logs"],
+            "result": {**prior_result, "attack_detected": True, "incident_type": "threat_intel_match",
+                       "threat_intel_ioc_matches": ioc_matches},
+        }
+
+    if confirmed_narrative_hit:
+        # A per-section retrieval + focused, undiluted confirmation call
+        # both agreed -- this is as close to deterministic as a semantic
+        # match gets, and specifically fixes the case a single combined-
+        # blob classification pass can miss (a small anomaly outweighed
+        # by a much larger volume of unrelated routine log content).
+        section_path, matched_narrative = confirmed_narrative_hit
+        print(f"✓ attack_detected: True (threat-intel narrative match confirmed on {section_path}: "
+              f"{matched_narrative.get('title')})")
+        return {
+            **_carry_context(state),
+            "logs": state["logs"],
+            "result": {**prior_result, "attack_detected": True, "incident_type": "threat_intel_match",
+                       "threat_intel_narratives": [matched_narrative],
+                       "threat_intel_confirmed_section": section_path},
+        }
+
+    threat_intel_context = ""
+    if narratives:
+        narrative_lines = "\n\n".join(
+            f"- {n.get('title')} ({n.get('mitre_technique') or 'no technique id'}, "
+            f"similarity {n.get('similarity', 0):.2f}): {n.get('narrative', '')[:400]}"
+            for n in narratives
+        )
+        threat_intel_context = f"""
+
+Threat intelligence context (retrieved, NOT observed on this system -- background
+reference on how known techniques typically look, for grounding only):
+{narrative_lines}
+
+This is reference material, not a report of what happened here. Only let it push
+you toward "threat_intel_match" if the LOGS BELOW literally show behavior matching
+one of these descriptions AND no other category above already fits better. If the
+logs don't actually show matching behavior, ignore this section entirely and judge
+from the logs alone, same as if no threat intelligence had been retrieved at all."""
 
     incident_type_template = ChatPromptTemplate.from_messages([
         ("system", f"""You are a cybersecurity analyst.
@@ -1193,7 +1432,7 @@ failed-then-succeeded-by-password sequence from one source IP is the
 compromise, regardless of any other routine publickey sessions, sudo
 commands, or cron jobs also present in the same log window; those surrounding
 lines are normal activity and shouldn't pull the classification toward a
-different category instead."""),
+different category instead.{threat_intel_context}"""),
         ("user", """Logs:
 {logs}
 
@@ -1202,7 +1441,7 @@ Title: {title}
 Content: {content}""")
     ])
 
-    input_payload = {"logs": state["logs"], "title": title, "content": content}
+    input_payload = {"logs": logs_text, "title": title, "content": content}
     incident_type_chain = incident_type_template | incident_type_model
 
     def _classify_once_vote() -> LogClassificationTemplate:
@@ -1261,10 +1500,19 @@ Do not include markdown, HTML, comments, or extra text before/after JSON."""),
     print(f"✓ attack_detected: {classification_result.attack_detected}"
           + (f", incident_type: {classification_result.incident_type}" if classification_result.attack_detected else ""))
 
+    # Narrative context can legitimately inform the classifier's choice of
+    # ANY of the incident types above, not just the dedicated
+    # "threat_intel_match" bucket -- e.g. it can be exactly what tips a
+    # borderline case into "assets_permission_tamper" instead of getting
+    # missed entirely. Surface it whenever it was actually retrieved and
+    # an incident was reported, regardless of which type got picked --
+    # narrowing this to incident_type == "threat_intel_match" only would
+    # silently hide that CTI was involved in every other case.
+    extra = {"threat_intel_narratives": narratives} if (narratives and classification_result.attack_detected) else {}
     return {
         **_carry_context(state),
         "logs": state["logs"],
-        "result": {**prior_result, **classification_result.model_dump()},
+        "result": {**prior_result, **classification_result.model_dump(), **extra},
     }
 
 
@@ -1429,6 +1677,43 @@ def _render_search_results_section(search_results: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_ioc_match_section(ioc_matches: list[dict]) -> str:
+    """A literal known-bad indicator was found in the raw log text --
+    rendered directly from the real match data, no LLM call, no DDG
+    search. Same rationale as LITERAL_PHRASE_SOURCES elsewhere in this
+    file: the evidence is deterministic, so the rendering is too."""
+    lines = ["## Threat Intel Match", "", f"<!-- {LOG_STATUS_MARKER}: threat_intel_match -->"]
+    lines.append(f"\n⚠ **{len(ioc_matches)} known-malicious indicator(s) found directly in the logs**, "
+                  f"matched exactly against the local threat-intelligence store:")
+    for m in ioc_matches:
+        lines.append(f"\n- **`{m['ioc_value']}`** ({m['ioc_type']}) — source: `{m.get('source', 'unknown')}`, "
+                      f"first seen `{m.get('valid_from', '?')}`"
+                      + (f", last confirmed active `{m['valid_until']}`" if m.get("valid_until") else ", still active"))
+    lines.append("\n**Recommended actions:**")
+    lines.append("- Treat this as confirmed malicious activity, not a heuristic guess — these are exact matches "
+                  "against known indicators, not a model's inference.")
+    lines.append("- Isolate any host that originated or received traffic involving these indicators.")
+    lines.append("- Cross-reference the indicator's `source` field (feed + malware family) for the specific "
+                  "threat this is associated with.")
+    return "\n".join(lines) + "\n"
+
+
+def _render_narrative_correlation_section(narratives: list[dict]) -> str:
+    """Appended after a normal incident section when the classification
+    was informed by (not just coincidentally near) retrieved CTI
+    narratives -- shown for transparency about why threat_intel_match was
+    chosen, not as independent proof (the actual justification is already
+    in the incident section above, grounded in the literal log content)."""
+    lines = ["\n### Correlated threat intelligence", "",
+             "Retrieved as supporting context during classification -- background reference on "
+             "known techniques, not itself a report of what happened on this system:"]
+    for n in narratives:
+        lines.append(f"\n- **{n.get('title')}** ({n.get('mitre_technique') or 'no technique id'}, "
+                      f"similarity {n.get('similarity', 0):.2f})")
+        lines.append(f"  {n.get('narrative', '')[:300]}")
+    return "\n".join(lines) + "\n"
+
+
 def _render_incident_section(incident_type: str,
                               explainer: ExplainerOutputTemplate | None,
                               search_results: list[dict]) -> str:
@@ -1537,10 +1822,22 @@ def run_log_analysis_loop(hierarchy: str, hierarchies_dir: Path, report_path: Pa
     print(f"\n{'='*70}\nProcessing incident: {incident_type}\n{'='*70}")
     incident_start = time.perf_counter()
 
-    queries = _form_search_queries(title, content, incident_type)
-    search_results = _run_ddg_search(queries) if queries else []
-    explainer = _explain_incident(title, content, incident_type, search_results)
-    section = _render_incident_section(incident_type, explainer, search_results)
+    ioc_matches = classification.get("threat_intel_ioc_matches") or []
+    narratives = classification.get("threat_intel_narratives") or []
+
+    if ioc_matches:
+        # Deterministic evidence deserves a deterministic rendering, not a
+        # generic-attack-type DDG search/explanation built for a named
+        # category like "user_breach" -- there's nothing to search for
+        # here, the evidence already speaks for itself.
+        section = _render_ioc_match_section(ioc_matches)
+    else:
+        queries = _form_search_queries(title, content, incident_type)
+        search_results = _run_ddg_search(queries) if queries else []
+        explainer = _explain_incident(title, content, incident_type, search_results)
+        section = _render_incident_section(incident_type, explainer, search_results)
+        if narratives:
+            section += _render_narrative_correlation_section(narratives)
 
     incident_elapsed = time.perf_counter() - incident_start
     print(f"  -- {incident_type} took {_fmt_elapsed(incident_elapsed)} --")
