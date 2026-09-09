@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — sets up this hierarchy_system_v2 checkout (the vault machine).
+# install.sh — sets up this hierarchy_system checkout (the vault machine).
 # Detects the platform and installs Python 3.11 accordingly:
 #   - Rocky Linux 8 (or another RHEL-like): dnf-installs python3.11/pip3.11
 #     (Rocky 8's bare python3/pip3 resolve to 3.6/3.7, so this is explicit

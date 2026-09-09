@@ -13,11 +13,11 @@ ddgs>=9.10.0
 python-dotenv>=1.0.0
 
 # MCP file transfer — this machine acts as an MCP *client* toward the vault's
-# hierarchy_system_v2/mcp_server.py (pulling/pushing hierarchy files AND
+# hierarchy_system/mcp_server.py (pulling/pushing hierarchy files AND
 # fetching the attack checklist) and an MCP *server* itself via
 # trigger_mcp_server.py (accepting "analyze this hierarchy" requests).
 fastmcp>=2.0.0
 
 # No chromadb / vector-store dependency — this package has no local corpus,
 # database, or embedding/RAG lookup of any kind. The attack checklist comes
-# entirely from hierarchy_system_v2's mcp_server.py over MCP.
+# entirely from hierarchy_system's mcp_server.py over MCP.

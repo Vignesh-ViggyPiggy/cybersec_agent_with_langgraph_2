@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — sets up this analysis_system_v2 checkout. Detects the
+# install.sh — sets up this analysis_system checkout. Detects the
 # platform and installs accordingly:
 #   - Rocky Linux 8 (or another RHEL-like): dnf-installs Python 3.11/pip3.11
 #     (Rocky 8's bare python3/pip3 resolve to 3.6/3.7, so this is explicit
@@ -10,7 +10,7 @@
 # the bundled cybersecqwen model (model/Modelfile + model/cybersecqwen.gguf,
 # produced by ../analysis_system/scripts/export_model.sh on the build
 # machine). No corpus to ingest — this package has no local corpus/database
-# of any kind; the attack checklist comes from hierarchy_system_v2 over MCP.
+# of any kind; the attack checklist comes from hierarchy_system over MCP.
 #
 # No service manager involved — this only installs things. Bring the
 # service up afterward with:
@@ -19,7 +19,7 @@
 #
 # Does NOT touch real IPs: copies .env.example to .env if missing, but you
 # still need to edit .env yourself afterward (MCP_SERVER_URL -> the vault
-# machine's real address, running hierarchy_system_v2/mcp_server.py).
+# machine's real address, running hierarchy_system/mcp_server.py).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

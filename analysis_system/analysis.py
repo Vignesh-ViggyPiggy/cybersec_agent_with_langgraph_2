@@ -309,6 +309,7 @@ class AttackState(TypedDict):
     final_status: NotRequired[str]     # detected | not_detected | not_detected_unverifiable | discrepancy | not_configured | cannot_determine
     explainer_text: NotRequired[str]
     corroborating_evidence_text: NotRequired[str]
+    attack_search_results: NotRequired[list[dict]]
     markdown_section: NotRequired[str]
 
 
@@ -641,12 +642,21 @@ def attack_info_node(state: AttackState) -> AttackState:
         f"how to respond to and remediate a {attack_type.replace('_', ' ')} attack",
     ]
 
+    search_results: list[dict] = []
     snippets = []
-    for query in queries:
+    for i, query in enumerate(queries, 1):
         try:
             with DDGS() as ddgs:
                 for r in list(ddgs.text(query, max_results=3)):
-                    snippets.append(f"- {r.get('title', '')}: {r.get('body', '')}")
+                    url = r.get("href", "")
+                    title = r.get("title", "")
+                    body = r.get("body", "")
+                    search_results.append({"query_number": i, "query": query, "title": title,
+                                            "url": url, "snippet": body})
+                    snippets.append(f"- {title}: {body}")
+                    print(f"       - {title}")
+                    if url:
+                        print(f"         {url}")
         except Exception as e:
             snippets.append(f"- (search failed for '{query}': {e})")
 
@@ -668,7 +678,8 @@ def attack_info_node(state: AttackState) -> AttackState:
     except Exception as e:
         explainer_text = f"(Explanation generation failed: {e})"
 
-    return {**state, "explainer_text": str(explainer_text), "corroborating_evidence_text": corroborating_evidence_text}
+    return {**state, "explainer_text": str(explainer_text), "corroborating_evidence_text": corroborating_evidence_text,
+            "attack_search_results": search_results}
 
 
 def render_markdown_section_node(state: AttackState) -> AttackState:
@@ -703,6 +714,7 @@ def render_markdown_section_node(state: AttackState) -> AttackState:
         if state.get("corroborating_evidence_text"):
             lines.append(f"\n### Corroborating raw evidence\n\n```\n{state['corroborating_evidence_text']}\n```")
         lines.append(f"\n### What this attack is / recommended actions\n\n{state.get('explainer_text', '')}")
+        lines.append(_render_search_results_section(state.get("attack_search_results") or []))
 
     elif final_status == "discrepancy":
         triggering = (state.get("triggering_results") or [{}])[0]
@@ -718,6 +730,7 @@ def render_markdown_section_node(state: AttackState) -> AttackState:
         if state.get("corroborating_evidence_text"):
             lines.append(f"\n### Corroborating raw evidence\n\n```\n{state['corroborating_evidence_text']}\n```")
         lines.append(f"\n### What this attack is / recommended actions\n\n{state.get('explainer_text', '')}")
+        lines.append(_render_search_results_section(state.get("attack_search_results") or []))
 
     elif final_status == "not_detected":
         lines.append(f"\n✅ Not detected. Verified clean across {len(all_results)} evidence source(s): {files_checked}.")

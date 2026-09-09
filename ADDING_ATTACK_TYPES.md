@@ -1,510 +1,231 @@
-# Adding a New Attack Type — Cookbook by Evidence Shape
+# Adding a New Attack Type — Cookbook
 
-Companion to [DOCUMENTATION.md](DOCUMENTATION.md) §5 and
+Companion to [DOCUMENTATION.md](DOCUMENTATION.md) and
 [EVIDENCE_ENGINE_DESIGN.md](EVIDENCE_ENGINE_DESIGN.md) (the design this
-cookbook now reflects, as implemented). Practical reference for adding a
-**new** attack type, organized by what evidence you actually have for it.
+cookbook reflects, as implemented). Practical reference for adding a
+**new** attack type to a vault's checklist.
 
-## The model: two tiers, both just evidence_sources
+## The model: everything is config, on the vault machine
 
-Every attack type is one ordered `evidence_sources` list, split into two
-tiers:
+Every attack type is entirely described by `.env` variables in
+`hierarchy_system/.env` — **no code change on either machine is needed to
+add one.** The analysis machine has no local knowledge of which attack
+types exist; it fetches the whole checklist fresh from
+`get_attack_checklist` once per run.
 
-- **`tier: "primary"`** — the live status read(s). All primary sources are
-  co-equal: if you have several (e.g. a multi-tag attack type), *any one*
-  reading `detected` makes the whole attack type `detected`. This is how
-  a case like "Alert.xml tag A, tag B, tag C, any one counts" is expressed
-  — three primary sources, not one primary plus special-cased siblings.
-- **`tier: "verification"`** — only reached once every primary source
-  reads clean. The first verification source to read `detected` makes the
-  result a `discrepancy` (tag said clean, evidence disagreed). If none are
-  configured, a clean primary result is `not_detected_unverifiable`
-  (unverified, not suspicious). If every configured verification source
-  reads clean, `not_detected` (verified).
-
-Each source resolves the same way regardless of what kind of file it
-reads — an XML tag, a text/log pattern scan, a rotating log file:
-
-1. Try each of its `known_patterns` in order (free, deterministic, tried
-   first). Four matcher kinds:
-   - `{"value": "1", "detected": true}` — exact string equality (tag reads)
-   - `{"min_value": 1, "detected": true}` — `int(value) >= N` (count-style checks)
-   - `{"non_empty": true, "detected": true}` — file has any content at all
-   - `{"pattern": "...", "detected": true}` — regex search, **supports named
-     groups + backreferences** — this is what replaces a bespoke Python
-     matcher for a correlated check (e.g. "the same IP in a Failed line,
-     then an Accepted line" — see the log-only examples below)
-2. If nothing matched and the source has `default_verdict` set, use that
-   (this is what makes "no pattern found" resolve to a definite clean
-   result instead of hanging as unresolved — also applies when the file
-   is missing entirely, e.g. a verification file that was simply never
-   configured to sync).
-3. If nothing matched and `judgment_allowed: true`, fall back to an LLM
-   judgment call grounded by the source's `examples`.
-4. Otherwise, `inconclusive`.
-
-**Multi-file sources**: `"file"` can be a list — every listed path (each
-glob-expanded if `"rotates": true`) is read and combined into ONE blob
-before pattern-matching or judging, not judged file-by-file. This matters
-for two real cases: a correlation pattern that needs to see two files
-together (`user_breach`'s sshd signal spans `var/log/secure` and
-`rationalclient.log`), and a multi-file LLM judgment where one file alone
-is ambiguous but combined with its sibling is clear (e.g. a detail file
-that's legitimately empty when clean, read alongside a summary file).
-
-**Zero Python changes for any of the 12 shapes below** — including the
-ones that previously needed a `RAW_LOG_CHECKERS` function. That was the
-entire point of this redesign; see EVIDENCE_ENGINE_DESIGN.md §1 for why.
-
-## Reference table
-
-| # | Sources given | Primary tier | Verification tier |
-|---|---|---|---|
-| 1 | Alert.xml tag + XML status + log pattern | 1 `xml_tag` source | 1 `text` source (log, `rotates: true`) — the XML status becomes a *separate, non-verifying* corroborating-display-only source is unnecessary here; fold it into the same verification source's `file` list if you want it shown alongside the log, or add it as its own verification-tier `judgment_allowed` source |
-| 2 | Alert.xml tag + XML output pattern + log pattern | 1 `xml_tag` source | 1 `text` source (log, `rotates: true`) |
-| 3 | Alert.xml tag + log pattern only | 1 `xml_tag` source | 1 `text` source (log, `rotates: true`) |
-| 4 | No Alert.xml; XML status + log pattern | 1 `xml_tag` source (on the XML file directly) | 1 `text` source (log, `rotates: true`) |
-| 5 | No Alert.xml; XML output pattern + log pattern | 1 `text` source (`known_patterns` regex) | 1 `text` source (log, `rotates: true`) |
-| 6 | Only log pattern | 1 `text` source (the log itself, `rotates: true`) | *(none — this one source is the whole chain)* |
-| 7 | Alert.xml status + XML status, no log | 1 `xml_tag` source | 1 `judgment_allowed` `text` source |
-| 8 | Alert.xml status + XML output pattern, no log | 1 `xml_tag` source | 1 `judgment_allowed` `text` source |
-| 9 | Only Alert.xml status | 1 `xml_tag` source | *(none)* |
-| 10 | Only XML status | 1 `xml_tag` source | *(none)* |
-| 11 | Only XML output pattern | 1 `text` source (`known_patterns` regex) | *(none)* |
-| 12 | Only log pattern, no other evidence | 1 `text` source (the log itself, `rotates: true`) | *(none — same shape as #6)* |
-
-Row 1/2/3 all reduce to the same real shape once you stop distinguishing
-"tag" from "pattern" at the verification tier — see the note in §7.1 of
-the old cookbook version: the distinction only ever mattered for a
-*primary* read, never for secondary/verification evidence, which just
-gets read as text either way.
-
-## The 12 examples, in full
-
-Each block is a complete, ready-to-adapt
-`corpus_documents/attack_example_N.json`. Replace `explanation`,
-`writer_script`, tag/pattern names, and `meaning` text with your real
-ones — the field *shapes* are what matters here.
-
-### Example 1 — Alert.xml tag + XML status + log pattern
-
-```json
-{
-  "id": "attack_example_1",
-  "explanation": "Placeholder description of what example attack 1 means when detected.",
-  "metadata": {
-    "attack_type": "example_1",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "Alert.xml",
-        "read_as": "xml_tag",
-        "tag": "example_attack_1",
-        "known_patterns": [{"value": "1", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      },
-      {
-        "tier": "verification",
-        "file": ["athinio/system/example_1_output.xml", "var/log/osstatus.log"],
-        "read_as": "text",
-        "rotates": true,
-        "known_patterns": [
-          {"pattern": "YourLogPattern", "detected": true, "meaning": "Matching pattern found in the combined evidence."}
-        ],
-        "default_verdict": "not_detected",
-        "default_meaning": "No matching pattern found."
-      }
-    ]
-  }
-}
-```
-
-### Example 2 — Alert.xml tag + XML output pattern + log pattern
-
-Same shape as Example 1 — the "XML output pattern" vs. "XML status" wording
-doesn't change anything at the verification tier, since both just become
-raw text handed to the same `known_patterns`/regex check:
-
-```json
-{
-  "id": "attack_example_2",
-  "explanation": "Placeholder description of what example attack 2 means when detected.",
-  "metadata": {
-    "attack_type": "example_2",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "Alert.xml",
-        "read_as": "xml_tag",
-        "tag": "example_attack_2",
-        "known_patterns": [{"value": "1", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      },
-      {
-        "tier": "verification",
-        "file": ["athinio/system/example_2_output.xml", "var/log/osstatus.log"],
-        "read_as": "text",
-        "rotates": true,
-        "known_patterns": [
-          {"pattern": "YourLogPattern", "detected": true, "meaning": "Matching pattern found in the combined evidence."}
-        ],
-        "default_verdict": "not_detected",
-        "default_meaning": "No matching pattern found."
-      }
-    ]
-  }
-}
-```
-
-### Example 3 — Alert.xml tag + log pattern only
-
-```json
-{
-  "id": "attack_example_3",
-  "explanation": "Placeholder description of what example attack 3 means when detected.",
-  "metadata": {
-    "attack_type": "example_3",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "Alert.xml",
-        "read_as": "xml_tag",
-        "tag": "example_attack_3",
-        "known_patterns": [{"value": "1", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      },
-      {
-        "tier": "verification",
-        "file": "var/log/osstatus.log",
-        "read_as": "text",
-        "rotates": true,
-        "known_patterns": [
-          {"pattern": "YourLogPattern", "detected": true, "meaning": "Matching pattern found in osstatus.log."}
-        ],
-        "default_verdict": "not_detected",
-        "default_meaning": "No matching pattern found in the available logs."
-      }
-    ]
-  }
-}
-```
-
-This is the real shape `user_breach` and `gateway_unauthorized_breakin`
-use — see their real `corpus_documents/attack_user_breach.json` /
-`attack_gateway_unauthorized_breakin.json` entries for a genuine
-correlation pattern (a backreference matching the same IP across two log
-lines) and a plain phrase match, respectively.
-
-### Example 4 — No Alert.xml; XML status (primary) + log pattern
-
-```json
-{
-  "id": "attack_example_4",
-  "explanation": "Placeholder description of what example attack 4 means when detected.",
-  "metadata": {
-    "attack_type": "example_4",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "athinio/system/example_4_output.xml",
-        "read_as": "xml_tag",
-        "tag": "ExampleStatus",
-        "known_patterns": [{"value": "1", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      },
-      {
-        "tier": "verification",
-        "file": "var/log/osstatus.log",
-        "read_as": "text",
-        "rotates": true,
-        "known_patterns": [
-          {"pattern": "YourLogPattern", "detected": true, "meaning": "Matching pattern found in osstatus.log."}
-        ],
-        "default_verdict": "not_detected",
-        "default_meaning": "No matching pattern found in the available logs."
-      }
-    ]
-  }
-}
-```
-
-### Example 5 — No Alert.xml; XML output pattern (primary) + log pattern
-
-```json
-{
-  "id": "attack_example_5",
-  "explanation": "Placeholder description of what example attack 5 means when detected.",
-  "metadata": {
-    "attack_type": "example_5",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "athinio/system/example_5_output.xml",
-        "read_as": "text",
-        "known_patterns": [{"pattern": "YourPattern", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean, pending log verification."
-      },
-      {
-        "tier": "verification",
-        "file": "var/log/osstatus.log",
-        "read_as": "text",
-        "rotates": true,
-        "known_patterns": [
-          {"pattern": "YourLogPattern", "detected": true, "meaning": "Matching pattern found in osstatus.log."}
-        ],
-        "default_verdict": "not_detected",
-        "default_meaning": "No matching pattern found in the available logs."
-      }
-    ]
-  }
-}
-```
-
-The primary source here is itself a pattern scan — the verification tier
-only ever runs when that scan already came back clean, as independent
-confirmation.
-
-### Example 6 — Only log pattern (log itself is the primary file)
-
-```json
-{
-  "id": "attack_example_6",
-  "explanation": "Placeholder description of what example attack 6 means when detected.",
-  "metadata": {
-    "attack_type": "example_6",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "var/log/osstatus.log",
-        "read_as": "text",
-        "rotates": true,
-        "known_patterns": [{"pattern": "YourPattern", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      }
-    ]
-  }
-}
-```
-
-Unlike the old design, there's no rotation caveat to worry about here —
-`rotates: true` glob-matches the file regardless of whether it's a single
-flat file or rotates on the real system, so this shape is safe by default.
-
-### Example 7 — Alert.xml status + XML status, no log
-
-```json
-{
-  "id": "attack_example_7",
-  "explanation": "Placeholder description of what example attack 7 means when detected.",
-  "metadata": {
-    "attack_type": "example_7",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "Alert.xml",
-        "read_as": "xml_tag",
-        "tag": "example_attack_7",
-        "known_patterns": [{"value": "1", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      },
-      {
-        "tier": "verification",
-        "file": "athinio/system/example_7_output.xml",
-        "read_as": "text",
-        "known_patterns": [],
-        "judgment_allowed": true,
-        "default_verdict": "not_detected",
-        "default_meaning": "Evidence file not found; falling back to the tag's own clean status.",
-        "examples": [
-          {"label": "clean", "content": "...", "note": "..."},
-          {"label": "detected", "content": "...", "note": "..."}
-        ]
-      }
-    ]
-  }
-}
-```
-
-### Example 8 — Alert.xml status + XML output pattern, no log
-
-Same shape as Example 7 — again, the distinction between "status" and
-"output pattern" only matters for a primary read, not a verification one:
-
-```json
-{
-  "id": "attack_example_8",
-  "explanation": "Placeholder description of what example attack 8 means when detected.",
-  "metadata": {
-    "attack_type": "example_8",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "Alert.xml",
-        "read_as": "xml_tag",
-        "tag": "example_attack_8",
-        "known_patterns": [{"value": "1", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      },
-      {
-        "tier": "verification",
-        "file": "athinio/system/example_8_output.xml",
-        "read_as": "text",
-        "known_patterns": [],
-        "judgment_allowed": true,
-        "default_verdict": "not_detected",
-        "default_meaning": "Evidence file not found; falling back to the tag's own clean status.",
-        "examples": []
-      }
-    ]
-  }
-}
-```
-
-### Example 9 — Only Alert.xml status
-
-```json
-{
-  "id": "attack_example_9",
-  "explanation": "Placeholder description of what example attack 9 means when detected.",
-  "metadata": {
-    "attack_type": "example_9",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "Alert.xml",
-        "read_as": "xml_tag",
-        "tag": "example_attack_9",
-        "known_patterns": [{"value": "1", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      }
-    ]
-  }
-}
-```
-
-The simplest possible shape — one source, no verification tier at all.
-
-### Example 10 — Only XML status
-
-```json
-{
-  "id": "attack_example_10",
-  "explanation": "Placeholder description of what example attack 10 means when detected.",
-  "metadata": {
-    "attack_type": "example_10",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "athinio/system/example_10_output.xml",
-        "read_as": "xml_tag",
-        "tag": "ExampleStatus",
-        "known_patterns": [{"value": "1", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      }
-    ]
-  }
-}
-```
-
-### Example 11 — Only XML output pattern
-
-```json
-{
-  "id": "attack_example_11",
-  "explanation": "Placeholder description of what example attack 11 means when detected.",
-  "metadata": {
-    "attack_type": "example_11",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "athinio/system/example_11_output.xml",
-        "read_as": "text",
-        "known_patterns": [{"pattern": "YourPattern", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      }
-    ]
-  }
-}
-```
-
-### Example 12 — Only log pattern, no other evidence
-
-Identical shape to Example 6, listed separately only to match the
-requested coverage:
-
-```json
-{
-  "id": "attack_example_12",
-  "explanation": "Placeholder description of what example attack 12 means when detected.",
-  "metadata": {
-    "attack_type": "example_12",
-    "writer_script": "unknown -- example entry",
-    "confidence": "example",
-    "evidence_sources": [
-      {
-        "tier": "primary",
-        "file": "var/log/osstatus.log",
-        "read_as": "text",
-        "rotates": true,
-        "known_patterns": [{"pattern": "YourPattern", "detected": true, "meaning": "Detected."}],
-        "default_verdict": "not_detected",
-        "default_meaning": "Clean."
-      }
-    ]
-  }
-}
-```
-
-## Other value_schema equivalents
-
-Two matcher kinds not shown above, for completeness:
-
-- **A count-style tag** (any nonzero value is a finding): use `xml_tag` with
-  `known_patterns: [{"min_value": 1, "detected": true, "meaning": "..."}]`
-  instead of `{"value": "1", ...}`.
-- **A file checked for presence, not a specific value** (e.g. a ban-list
-  file that's either empty or has content): use `read_as: "text"` with
-  `known_patterns: [{"non_empty": true, "detected": true, "meaning": "..."}]`.
-
-## After writing any of these
+## Step 1 — add it to `ATTACK_ORDER`
 
 ```bash
-python ingest_corpus.py   # corpus_server.py must already be running
+ATTACK_ORDER=...,existing_type,my_new_attack_type
 ```
 
-The new attack type is live from the next run onward — picked up
-automatically by `get_known_attack_types()`, checked through the exact
-same generic engine as every other one, with no further wiring at all.
+A type left out of this list is never checked at all, regardless of
+whether its other `ATTACK_*` variables are still set — so you can disable
+a type temporarily by removing it here without deleting its configuration.
+
+## Step 2 — configure its evidence source(s)
+
+`ATTACK_PRIMARY_my_new_attack_type` is required; everything else is
+optional. Each source is `"<path>[#tag]"`:
+
+| Shape | Spec | Example |
+|---|---|---|
+| Single XML tag | `path#tag` | `Alert.xml#my_flag` |
+| Whole file as text | `path` (no `#`) | `athinio/system/secOpsOutput_99` |
+| Multiple files, one combined reading | `pathA;pathB` | `rationalVault/log/rationalclient.log;var/log/osstatus.log` |
+| Multiple co-equal sources | comma-separated | `Alert.xml#tag_a,Alert.xml#tag_b` |
+
+**Co-equal sources** (comma-separated): *any one* reading `detected` makes
+the whole attack type `detected`. This is how a multi-tag attack type is
+expressed — see `ransomware`'s real config:
+```bash
+ATTACK_PRIMARY_ransomware=Alert.xml#Ransom,Alert.xml#bin,Alert.xml#lib,Alert.xml#honeypot,Alert.xml#Process
+```
+five co-equal primary sources, not one primary plus four special-cased
+checks.
+
+**Combined multi-file readings** (`;`-joined, inside one source entry):
+use this when two files only make sense interpreted together — e.g. a
+detection line teed to two different logs simultaneously, or a log whose
+meaning depends on context from a sibling file. The combined content gets
+a `--- path ---` header per file before being judged as one reading.
+
+**Every plain-text path is glob-matched as a prefix** (`path*`) — this
+transparently handles rotating logs (`gateway.log` on the real vault is
+always `gateway.log_NNN`, never the bare name) without a separate
+"rotates" flag.
+
+## Step 3 — add optional metadata
+
+```bash
+ATTACK_VERIFY_my_new_attack_type=...       # same shape as PRIMARY; only
+                                            # reached once every primary
+                                            # source reads clean
+ATTACK_WRITER_my_new_attack_type="..."     # human-readable provenance
+                                            # chain, shown in the report's
+                                            # "Source chain" — confirm this
+                                            # against the REAL writer
+                                            # script's source before
+                                            # writing it, not just a guess
+                                            # from the tag name
+ATTACK_UI_FEATURE_my_new_attack_type="..." # dashboard feature name, used
+                                            # in a discrepancy's "re-run
+                                            # this" recommendation
+ATTACK_RELIABLE_my_new_attack_type=false   # marks the data source itself
+                                            # as known-unreliable -- the
+                                            # workflow reports "cannot
+                                            # determine" instead of
+                                            # reading it at all, regardless
+                                            # of its current value
+ATTACK_CAVEAT_my_new_attack_type="..."     # free-text note, rendered under
+                                            # "Cannot determine" (and kept
+                                            # as documentation generally)
+```
+
+`ATTACK_RELIABLE_<type>=false` is for a source you've confirmed is
+structurally untrustworthy — e.g. a file that's never truncated between
+runs, so a "Tampered" reading could be stale from weeks ago rather than
+from this run. Don't reach for it just because a source is unverified;
+that's what the `not_detected_unverifiable` status (no `ATTACK_VERIFY_`
+configured) already covers correctly.
+
+## Step 4 — decide whether the model needs new training examples
+
+This is the one step that isn't a pure config edit, and it's genuinely
+optional most of the time.
+
+**Usually nothing is needed.** `cybersecqwen` generalizes the basic
+"tag reads 1 → detected, tag reads 0 → clean" pattern extremely well to
+attack types and tag names it has never seen — confirmed via an
+exhaustive sweep of every configured tag at both values across the whole
+`.env` (130 cases, 99.2% pass, including many attack types whose writer
+is "unknown -- no detection writer confirmed" and were never in any
+training set). If your new source is a straightforward single-tag or
+multi-tag ALERT-style reading, just add the `.env` config and test it —
+it will very likely already work correctly with zero retraining.
+
+**New training examples are worth adding when:**
+- The evidence source is a **free-text log**, not an XML tag — the model
+  has much less exposure to arbitrary log-line phrasing than to the
+  `<ALERT><Tag>value</Tag></ALERT>` shape, so a genuinely novel log format
+  benefits from at least one worked detected/clean example.
+- The real detection logic has a **surface-vocabulary trap** — content
+  that *sounds* alarming (a kill signal, an error code, an unfamiliar
+  process name) but isn't the actual ground truth, or vice versa. Confirm
+  the real writer script's exact trigger condition from source before
+  writing the example; don't infer it from the tag name.
+- The evidence involves **correlation across lines/files** (e.g.
+  `user_breach`'s "failed logins from an IP, then a success from the same
+  IP" pattern) rather than a single value read in isolation.
+
+If none of those apply, skip this step — don't add training data
+speculatively for a pattern the model already handles.
+
+### Adding the training examples
+
+Training examples for new-attack-type coverage and evidence-source gaps
+live in `cybersecqwen_finetune/generate_new_attack_examples.py`, separate
+from the corpus-derived bulk of the dataset. Two helpers:
+
+- `_row(source, tag, value, detected, explanation)` — for an XML-tag
+  reading; wraps content as `<ALERT>\n  <Tag>value</Tag>\n</ALERT>`,
+  matching exactly how every real tag reading is sent to the model.
+- `_row_text(source, content, detected, explanation)` — for a free-text
+  log source; sends `content` as-is, no wrapper.
+
+Add one DETECTED + one CLEAN example (a matched pair) using real or
+realistic content, then:
+
+```bash
+cd cybersecqwen_finetune
+python generate_new_attack_examples.py   # prints a row count, sanity check
+python build_combined_dataset.py         # folds into finetune_dataset/train.jsonl + val.jsonl
+```
+
+Retrain (`kaggle_finetune_cybersecqwen.ipynb`), then validate — see
+**Testing a new or changed source** below.
+
+**If a single example doesn't stick across a retrain**, don't
+immediately add a second, differently-labeled example hoping variety
+fixes it — first add 2-4 *more variations of the same pattern* (different
+process names/PIDs/timestamps, same ground truth) to actually shift the
+weight of evidence, since a lone counter-example can get outweighed by
+the base model's own prior. If it *still* doesn't stick after that, and
+the real writer script's own logic turns out to be a plain literal-string
+grep (not a judgment call at all), that's the signal to use the
+deterministic exception instead of continuing to retrain — see
+**When the "judgment" isn't actually a judgment** below.
+
+## When the "judgment" isn't actually a judgment
+
+Before writing training examples for a source that seems to consistently
+resist the model's judgment, check what the *real* writer script actually
+does. Some detection scripts are themselves just a `grep` for one fixed
+literal phrase — there's no ambiguity to model, and no amount of training
+data reliably teaches a semantic classifier to behave like an exact-match
+lookup when the input's surface vocabulary is misleading (confirmed: one
+real case needed 5 retrains and 7 training rows before this became the
+right call instead of "one more example").
+
+If you've confirmed this from the real writer script's source, add the
+pair to `analysis.py`'s `LITERAL_PHRASE_SOURCES` registry instead:
+
+```python
+LITERAL_PHRASE_SOURCES: dict[tuple[str, str], str] = {
+    ("gateway_unauthorized_breakin", "home/athinio/data/1cloudFiler/log/gateway.log"): "Possible Break-in Attempt",
+    ("my_new_attack_type", "path/to/the.log"): "The Exact Literal Phrase",
+}
+```
+
+`_evaluate_source` checks this before ever calling the model — an exact
+substring match, resolved in effectively zero time, no LLM call, no
+training data needed. Scope it to exactly the `(attack_type, file)` pair
+you've confirmed; don't reach for it as a shortcut for a source you
+haven't actually verified is a plain grep in the real script.
+
+## Testing a new or changed source
+
+Two levels, cheapest first:
+
+**1. Direct evidence-source test** — no vault, no MCP, just the real
+resolution path with synthetic files:
+```python
+import analysis
+from pathlib import Path
+import tempfile
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    (root / "Alert.xml").write_text("<ROOT>\n  <my_flag>1</my_flag>\n</ROOT>", encoding="utf-8")
+    result = analysis._evaluate_source(root, "my_new_attack_type", "Alert.xml#my_flag", "primary")
+    print(result["verdict"], result["meaning"])
+```
+This calls `_evaluate_source` — the same function the real pipeline uses
+— so it exercises the `LITERAL_PHRASE_SOURCES` shortcut too, if
+applicable, unlike calling `_judge_content_with_model` directly.
+
+**2. Full-checklist regression sweep** — before treating any model
+change as validated, re-run the same sweep this project uses after every
+retrain: every tag in every configured attack type, at both DETECTED(1)
+and CLEAN(0), through `_evaluate_source`. A single new/changed source
+passing in isolation doesn't rule out a regression elsewhere — this
+sweep is what actually caught (and reconfirmed) the `gateway.log` trap
+case across five separate retrains, and is the fastest way to get a
+complete accuracy picture rather than spot-checking one case at a time.
+
+## Real example — a genuinely new type, no training needed
+
+```bash
+ATTACK_ORDER=...,disk_encryption_disabled
+ATTACK_PRIMARY_disk_encryption_disabled=Alert.xml#disk_encryption_status
+ATTACK_WRITER_disk_encryption_disabled="unknown -- new tag, no detection writer confirmed"
+ATTACK_CAVEAT_disk_encryption_disabled="New, low-confidence attack type. Semantics inferred from the tag name only."
+```
+
+That's the whole addition. No `ATTACK_VERIFY_`, no training data — this
+is exactly the shape (`Alert.xml#<tag>`, simple binary flag) the model
+already generalizes correctly, confirmed by the exhaustive sweep covering
+this exact pattern across dozens of other attack types. Test it with the
+direct evidence-source snippet above before considering it done; only
+reach for the training-data or literal-phrase paths if that test surfaces
+a real problem.
