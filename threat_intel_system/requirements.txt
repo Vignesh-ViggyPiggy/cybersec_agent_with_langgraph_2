@@ -1,0 +1,11 @@
+# CTI/STIX storage + retrieval service. No chromadb / dedicated vector-DB
+# dependency -- SQLite (stdlib) holds everything; similarity ranking is a
+# plain numpy cosine-similarity scan over embeddings loaded from it.
+
+fastmcp>=2.0.0
+python-dotenv>=1.0.0
+numpy>=1.24.0
+
+# Embeddings via Ollama's nomic-embed-text (already used elsewhere in this
+# project) -- no external embedding API.
+langchain-ollama>=0.2.0

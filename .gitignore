@@ -254,3 +254,9 @@ analysis_system/model/*.gguf
 # machine-local process state, not source. *.log is already covered above
 # (Django stuff), which also catches mcp_server.log/trigger_mcp_server.log.
 *.pid
+
+# threat_intel_system's SQLite store (stix_objects/observables/
+# intel_narratives/sync_state) — ingested data, not source. Fully
+# regenerable by re-running ingest_mitre_attack.py (or any other ingest
+# script) against db.py's schema.
+threat_intel_system/*.db
