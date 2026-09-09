@@ -1,4 +1,4 @@
-FROM ./cybersecqwen.gguf
+FROM ./cybersecqwen-fine.gguf
 
 TEMPLATE "{{- range .Messages }}<|im_start|>{{ .Role }}
 {{ .Content }}<|im_end|>

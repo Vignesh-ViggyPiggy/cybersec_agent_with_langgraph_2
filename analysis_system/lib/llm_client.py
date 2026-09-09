@@ -1,10 +1,10 @@
 """
 llm_client.py — the single shared Ollama client instance/config.
 
-Moved out of test_legacy_log_aggregation.py (now removed) so both
-attack_status_workflow.py and lib/log_analysis_workflow.py can import the
-SAME configured model instead of each defining their own, or one importing
-it from the other by convention.
+Everything in this package that talks to the LLM (the fine-tuned
+cybersecqwen model doing per-source DETECTED/CLEAN judgments, and its
+general-purpose explanation/log-classification calls) imports the SAME
+configured instance from here, instead of each defining its own.
 """
 
 import os
@@ -35,3 +35,15 @@ if MODEL_NUM_GPU is not None:
     _model_kwargs["num_gpu"] = int(MODEL_NUM_GPU)
 
 model = ChatOllama(**_model_kwargs)
+
+# The exact system prompt cybersecqwen was fine-tuned on (see
+# cybersecqwen_finetune/SESSION_SUMMARY.md / model/Modelfile) — every
+# per-source DETECTED/CLEAN judgment call in analysis.py must use this
+# verbatim, since the model's training rows all pair this system prompt with
+# a "Source: {attack_type}\n\nContent:\n{content}" user message.
+CYBERSECQWEN_JUDGE_SYSTEM_PROMPT = (
+    "You are a cybersecurity analyst. Given the raw content of a security-relevant file or log entry, "
+    "state whether it shows DETECTED (an attack/incident indicator) or CLEAN (normal, healthy behavior), "
+    "and explain why in 1-3 sentences, citing the specific detail in the content that supports your "
+    "conclusion. Be literal and precise about what the content actually says."
+)

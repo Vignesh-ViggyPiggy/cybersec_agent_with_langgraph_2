@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# install.sh — sets up this analysis_system checkout. Detects the platform
-# and installs accordingly:
+# install.sh — sets up this analysis_system_v2 checkout. Detects the
+# platform and installs accordingly:
 #   - Rocky Linux 8 (or another RHEL-like): dnf-installs Python 3.11/pip3.11
 #     (Rocky 8's bare python3/pip3 resolve to 3.6/3.7, so this is explicit
 #     throughout) and Ollama via its official installer.
 #   - Windows, run under Git Bash: uses winget for Python 3.11 and Ollama
 #     if either isn't already present.
-# Either way it then creates a venv, installs requirements.txt, builds the
-# bundled cybersecqwen model (model/Modelfile + model/cybersecqwen.gguf,
-# produced by scripts/export_model.sh on the build machine), and ingests
-# the attack corpus into a freshly-started corpus_server.py.
+# Either way it then creates a venv, installs requirements.txt, and builds
+# the bundled cybersecqwen model (model/Modelfile + model/cybersecqwen.gguf,
+# produced by ../analysis_system/scripts/export_model.sh on the build
+# machine). No corpus to ingest — this package has no local corpus/database
+# of any kind; the attack checklist comes from hierarchy_system_v2 over MCP.
 #
-# No service manager involved — this only installs things and ingests the
-# corpus once. Bring the actual services up afterward with ./start.sh.
+# No service manager involved — this only installs things. Bring the
+# service up afterward with:
+#   venv/bin/python trigger_mcp_server.py        (Linux)
+#   venv/Scripts/python.exe trigger_mcp_server.py (Windows)
 #
 # Does NOT touch real IPs: copies .env.example to .env if missing, but you
 # still need to edit .env yourself afterward (MCP_SERVER_URL -> the vault
-# machine's real address).
+# machine's real address, running hierarchy_system_v2/mcp_server.py).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,7 +49,7 @@ case "$(uname -s)" in
 esac
 echo "Detected platform: $OS_KIND"
 
-echo "== [1/6] Installing Python 3.11 =="
+echo "== [1/5] Installing Python 3.11 =="
 case "$OS_KIND" in
   rocky|linux-other)
     if [ "$EUID" -ne 0 ]; then
@@ -79,13 +82,13 @@ case "$OS_KIND" in
     ;;
 esac
 
-echo "== [2/6] Creating venv and installing Python dependencies =="
+echo "== [2/5] Creating venv and installing Python dependencies =="
 $PY311 -m venv venv
 if [ -x venv/Scripts/python.exe ]; then PY="venv/Scripts/python.exe"; else PY="venv/bin/python"; fi
 "$PY" -m pip install --upgrade pip
 "$PY" -m pip install -r requirements.txt
 
-echo "== [3/6] Installing Ollama =="
+echo "== [3/5] Installing Ollama =="
 if ! command -v ollama >/dev/null 2>&1; then
   case "$OS_KIND" in
     rocky|linux-other)
@@ -110,29 +113,20 @@ if ! wait_for_port "http://127.0.0.1:11434/" 5; then
   wait_for_port "http://127.0.0.1:11434/" 30
 fi
 
-echo "== [4/6] Pulling embedding model and building cybersecqwen =="
-ollama pull nomic-embed-text
+echo "== [4/5] Building cybersecqwen =="
 if [ ! -f model/Modelfile ] || [ ! -f model/cybersecqwen.gguf ]; then
   echo "Missing model/Modelfile or model/cybersecqwen.gguf in this package — cannot build the model." >&2
-  echo "Rebuild the tarball with scripts/package_release.sh on a machine that has the model." >&2
+  echo "Copy them from ../analysis_system/model/ or rebuild via ../analysis_system/scripts/export_model.sh." >&2
   exit 1
 fi
 ollama create cybersecqwen -f model/Modelfile
 
-echo "== [5/6] Ingesting corpus documents into the vector store =="
-nohup "$PY" corpus_server.py > corpus_server.log 2>&1 &
-CORPUS_PID=$!
-wait_for_port "http://127.0.0.1:8003/mcp" 30
-"$PY" ingest_corpus.py
-kill "$CORPUS_PID" 2>/dev/null || true
-
-echo "== [6/6] Preparing .env =="
+echo "== [5/5] Preparing .env =="
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "Wrote .env from .env.example — edit MCP_SERVER_URL before running ./start.sh."
+  echo "Wrote .env from .env.example — edit MCP_SERVER_URL before running trigger_mcp_server.py."
 fi
 
 echo
-echo "Install complete. Edit .env to point at your vault machine, then bring the"
-echo "services up with:"
-echo "  ./start.sh"
+echo "Install complete. Edit .env to point at your vault machine, then run:"
+echo "  $PY trigger_mcp_server.py"

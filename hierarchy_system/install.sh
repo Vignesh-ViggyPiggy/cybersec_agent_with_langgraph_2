@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — sets up this hierarchy_system checkout (the vault machine).
+# install.sh — sets up this hierarchy_system_v2 checkout (the vault machine).
 # Detects the platform and installs Python 3.11 accordingly:
 #   - Rocky Linux 8 (or another RHEL-like): dnf-installs python3.11/pip3.11
 #     (Rocky 8's bare python3/pip3 resolve to 3.6/3.7, so this is explicit
@@ -15,7 +15,10 @@
 #
 # Does NOT touch real IPs: copies .env.example to .env if missing, but you
 # still need to edit .env yourself afterward (ANALYSIS_SERVER_URL -> the
-# analysis machine's real address).
+# analysis machine's real address) — the attack-checking configuration
+# (ATTACK_ORDER, ATTACK_PRIMARY_*, etc.) already ships fully populated in
+# .env.example's companion, the real .env in this same directory; edit that
+# if you need to change which attack types are checked or where.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

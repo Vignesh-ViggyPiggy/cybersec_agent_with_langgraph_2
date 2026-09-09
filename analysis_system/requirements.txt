@@ -13,13 +13,11 @@ ddgs>=9.10.0
 python-dotenv>=1.0.0
 
 # MCP file transfer — this machine acts as an MCP *client* toward the vault's
-# mcp_server.py (pulling/pushing hierarchy files) and an MCP *server* itself
-# via trigger_mcp_server.py (accepting "analyze this hierarchy" requests) and
-# corpus_server.py (the attack-corpus vector store, same client/server pattern).
+# hierarchy_system_v2/mcp_server.py (pulling/pushing hierarchy files AND
+# fetching the attack checklist) and an MCP *server* itself via
+# trigger_mcp_server.py (accepting "analyze this hierarchy" requests).
 fastmcp>=2.0.0
 
-# Local vector store for the attack corpus (corpus_server.py). Embeddings use
-# Ollama's nomic-embed-text model (requires: ollama pull nomic-embed-text),
-# not chromadb's own default embedding function, so this stays inside the
-# one local runtime already used everywhere else in this project.
-chromadb>=0.5.0
+# No chromadb / vector-store dependency — this package has no local corpus,
+# database, or embedding/RAG lookup of any kind. The attack checklist comes
+# entirely from hierarchy_system_v2's mcp_server.py over MCP.

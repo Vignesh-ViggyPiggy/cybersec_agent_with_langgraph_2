@@ -1,8 +1,8 @@
-# analysis_server.py
+# trigger_mcp_server.py
 from fastmcp import FastMCP
 from pathlib import Path
 
-from attack_status_workflow import run_full_workflow, DEFAULT_VAULT_ROOT
+from analysis import run_full_workflow, DEFAULT_VAULT_ROOT
 
 mcp = FastMCP("Analysis-Trigger")
 
@@ -13,7 +13,8 @@ HIERARCHIES_DIR = Path(__file__).parent / "hierarchies"
 def analyze_hierarchy(hierarchy: str, vault_root: str = DEFAULT_VAULT_ROOT) -> dict:
     """
     Run the full analysis workflow for one hierarchy path (e.g. "5/101/1/4/1")
-    — every per-attack status check, followed by secure/messages/audit.log
+    — every per-attack status check (per hierarchy_system's attack
+    checklist, no local corpus), followed by secure/messages/audit.log
     analysis as a catch-all, all in one report. Pulls that hierarchy's files
     from the vault, then pushes the finished report back alongside the
     source files; run_full_workflow handles both internally.
